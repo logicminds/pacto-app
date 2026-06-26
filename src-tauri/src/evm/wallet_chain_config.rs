@@ -186,3 +186,54 @@ pub fn explorer_url_for_tx(net: &WalletNetworkConfig, tx_hash_hex: &str) -> Stri
     let h = tx_hash_hex.strip_prefix("0x").unwrap_or(tx_hash_hex);
     format!("{}0x{}", net.explorer_tx_path, h)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn local_network_is_in_wallet_networks() {
+        let local = wallet_networks()
+            .iter()
+            .find(|n| n.key == "local")
+            .expect("local network should be present");
+        assert_eq!(local.chain_id, 31_337);
+        assert_eq!(local.display_name, "Local Anvil");
+        assert_eq!(local.native_symbol, "ETH");
+        assert_eq!(local.native_decimals, 18);
+        assert_eq!(local.usdc_address, "0x0000000000000000000000000000000000000000");
+        assert_eq!(local.usdt_address, "0x0000000000000000000000000000000000000000");
+        assert_eq!(local.usdc_decimals, 6);
+        assert_eq!(local.usdt_decimals, 6);
+    }
+
+    #[test]
+    fn network_by_key_is_case_insensitive_for_local() {
+        for key in ["local", "LOCAL", "Local"] {
+            let net = network_by_key(key).expect("local lookup should succeed");
+            assert_eq!(net.key, "local", "key '{}' should resolve to local", key);
+        }
+    }
+
+    #[test]
+    fn network_by_key_anvil_alias_is_not_local() {
+        assert!(network_by_key("anvil").is_none());
+    }
+
+    #[test]
+    fn rpc_urls_for_local_ignores_alchemy_key() {
+        std::env::set_var("ALCHEMY_RPC_KEY", "test-key");
+        let local = network_by_key("local").unwrap();
+        assert_eq!(
+            rpc_urls_for(local),
+            vec!["http://localhost:8545".to_string()]
+        );
+        std::env::remove_var("ALCHEMY_RPC_KEY");
+    }
+
+    #[test]
+    fn explorer_url_for_tx_local_returns_hash_only() {
+        let local = network_by_key("local").unwrap();
+        assert_eq!(explorer_url_for_tx(local, "0xabc..."), "0xabc...");
+    }
+}

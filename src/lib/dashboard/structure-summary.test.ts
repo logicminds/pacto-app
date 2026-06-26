@@ -69,4 +69,18 @@ describe('resolveDashboardStructureSummary', () => {
     expect(s?.chainDisplayName).toBe('Optimism');
     expect(s?.hatsExplorerUrl).toBe('https://app.hatsprotocol.xyz/trees/10/298');
   });
+
+  it('returns summary for local anvil chain', () => {
+    const s = resolveDashboardStructureSummary({ ...pactoGovRow, chain: 'local' });
+    expect(s?.chainKey).toBe('local');
+    expect(s?.chainIdNumeric).toBe(31337);
+    expect(s?.chainDisplayName).toBe('Local Anvil');
+    expect(s?.hatsExplorerUrl).toBe('https://app.hatsprotocol.xyz/trees/31337/298');
+  });
+
+  it('normalizes chain "anvil" to local', () => {
+    const s = resolveDashboardStructureSummary({ ...pactoGovRow, chain: 'anvil' });
+    expect(s?.chainKey).toBe('local');
+    expect(s?.chainIdNumeric).toBe(31337);
+  });
 });
