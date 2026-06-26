@@ -51,12 +51,13 @@ struct TokenJson {
 }
 
 /// Stable iteration order (must match product expectations and frontend `WALLET_ASSETS_CHAIN_IDS`).
-const NETWORK_KEYS: &[&str] = &["mainnet", "arbitrum", "optimism", "gnosis", "sepolia"];
+const NETWORK_KEYS: &[&str] = &["mainnet", "arbitrum", "optimism", "gnosis", "sepolia", "local"];
 
 fn chain_id_for_key(key: &str) -> Option<u64> {
     match key {
         "arbitrum" => Some(42_161),
         "gnosis" => Some(100),
+        "local" => Some(31_337),
         "mainnet" => Some(1),
         "optimism" => Some(10),
         "sepolia" => Some(11155111),
@@ -71,6 +72,7 @@ fn default_rpc_urls_for_key(key: &str) -> Vec<&'static str> {
             "https://arb1.arbitrum.io/rpc",
             "https://arbitrum.publicnode.com",
         ],
+        "local" => vec!["http://localhost:8545"],
         "mainnet" => vec![
             "https://ethereum.publicnode.com",
             "https://1rpc.io/eth",
@@ -150,7 +152,7 @@ fn build_ordered_networks() -> Vec<WalletNetworkConfig> {
 
 static ORDERED_NETWORKS: Lazy<Vec<WalletNetworkConfig>> = Lazy::new(build_ordered_networks);
 
-/// All configured networks in product order (mainnet, arbitrum, optimism, gnosis, sepolia).
+/// All configured networks in product order (mainnet, arbitrum, optimism, gnosis, sepolia, local).
 pub fn wallet_networks() -> &'static [WalletNetworkConfig] {
     ORDERED_NETWORKS.as_slice()
 }

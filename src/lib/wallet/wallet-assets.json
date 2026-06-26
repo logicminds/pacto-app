@@ -1,5 +1,5 @@
 {
-  "$comment": "Native gas + USDC/USDT on Arbitrum, Ethereum, Gnosis, Optimism, and Sepolia. Re-verify Sepolia USDT on Etherscan before production-like testing; testnet deployments can change.",
+  "$comment": "Native gas + USDC/USDT on Arbitrum, Ethereum, Gnosis, Optimism, and Sepolia. Local/Anvil (chain 31337) uses zero-address placeholders for USDC/USDT because the backend expects both tokens to exist; replace with deployed mocks when testing transfers.",
   "version": 1,
   "networks": {
     "arbitrum": {
@@ -96,6 +96,27 @@
           "address": "0x523c8591fbe215b5af0bead65e65df783a37bcbc",
           "decimals": 6,
           "note": "Common Sepolia test USDT; confirm on Sepolia Etherscan before relying on liquidity"
+        }
+      }
+    },
+    "local": {
+      "viemChainKey": "local",
+      "displayName": "Local Anvil",
+      "explorerTxPath": "",
+      "native": {
+        "symbol": "ETH",
+        "decimals": 18
+      },
+      "tokens": {
+        "USDC": {
+          "address": "0x0000000000000000000000000000000000000000",
+          "decimals": 6,
+          "note": "Zero-address placeholder; deploy a local USDC mock to test transfers"
+        },
+        "USDT": {
+          "address": "0x0000000000000000000000000000000000000000",
+          "decimals": 6,
+          "note": "Zero-address placeholder; deploy a local USDT mock to test transfers"
         }
       }
     }

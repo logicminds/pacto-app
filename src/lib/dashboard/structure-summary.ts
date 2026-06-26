@@ -40,6 +40,8 @@ function governanceChainDisplayName(key: SupportedChainId): string {
       return 'Gnosis';
     case 'sepolia':
       return 'Sepolia';
+    case 'local':
+      return 'Local Anvil';
   }
 }
 
