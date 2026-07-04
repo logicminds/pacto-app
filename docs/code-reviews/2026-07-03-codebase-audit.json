@@ -1,0 +1,3082 @@
+{
+  "status": "complete",
+  "verdict": "Not ready",
+  "scope": {
+    "base": "standalone-audit-main",
+    "branch": "main",
+    "head_sha": "c50bb80ae261e744383e2b496cf4e105d7e6613e",
+    "pr_url": null,
+    "files_changed": 354
+  },
+  "intent": "Standalone audit of the current Pacto codebase to identify security vulnerabilities, correctness bugs, and development-velocity blockers before broader AI and human contributor scaling.",
+  "intent_confidence": "explicit",
+  "reviewers": [
+    "security",
+    "correctness",
+    "frontend",
+    "dev-velocity"
+  ],
+  "findings": [
+    {
+      "title": "Hardcoded Argon2 salt weakens key derivation",
+      "severity": "P0",
+      "file": "src-tauri/src/crypto.rs",
+      "line": 71,
+      "why_it_matters": "A fixed, public salt means identical passwords produce identical keys across every install. An attacker who extracts the encrypted database can pre-compute or share rainbow tables, turning password guessing into a fast offline attack instead of a per-user brute-force.",
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "confidence": 100,
+      "evidence": [
+        "crypto.rs:71-72 `let salt = \"vectovectvecvevpacto\".as_bytes();`",
+        "crypto.rs:64 `pub async fn hash_pass(password: String) -> [u8; 32]` derives the encryption key directly from this salt",
+        "TODO comment at crypto.rs:71 acknowledges the issue but leaves it hardcoded"
+      ],
+      "pre_existing": false,
+      "suggested_fix": "Generate a random 16+ byte salt on first install, store it in the OS keychain or a dedicated file outside the encrypted database, and pass it to argon2.hash_password_into.",
+      "reviewers": [
+        "security"
+      ],
+      "#": 1
+    },
+    {
+      "title": "Global ENCRYPTION_KEY is shared across accounts and pinned on first use",
+      "severity": "P0",
+      "file": "src-tauri/src/crypto.rs",
+      "line": 88,
+      "why_it_matters": "internal_encrypt uses the first key it ever sees (from a PIN or Argon2) for all subsequent encryption, and stores it in a global OnceCell. Switching accounts, rotating PINs, or creating a second account does not rotate the key, so all accounts' secrets are encrypted under the same key derived from the first PIN used in the process lifetime.",
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "confidence": 100,
+      "evidence": [
+        "crypto.rs:88-89 `let key = if password.is_none() { crate::ENCRYPTION_KEY.get().unwrap() } else { &hash_pass(password.unwrap()).await };`",
+        "crypto.rs:115-117 `if crate::ENCRYPTION_KEY.get().is_none() { crate::ENCRYPTION_KEY.set(*key).unwrap(); }`",
+        "lib.rs global `static ENCRYPTION_KEY: OnceCell<[u8; 32]> = OnceCell::new();`"
+      ],
+      "pre_existing": false,
+      "suggested_fix": "Scope the encryption key per account and derive it from the account-specific PIN each time; do not cache it globally. If caching is needed for performance, use a key cache keyed by active account and clear it on logout/switch.",
+      "reviewers": [
+        "security"
+      ],
+      "#": 2
+    },
+    {
+      "title": "MLS keypackage publishing is a no-op stub",
+      "severity": "P0",
+      "file": "src-tauri/src/mls.rs",
+      "line": 160,
+      "why_it_matters": "Other devices cannot add this device to MLS groups because keypackages are never generated, published, or indexed. Group creation that depends on this device will fail silently or create groups with missing members.",
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "confidence": 100,
+      "evidence": [
+        "mls.rs:160-166: publish_device_keypackage contains only TODO comments and returns Ok(()) after ignoring the device_id argument."
+      ],
+      "suggested_fix": "Implement real nostr-mls keypackage generation, publish the event to TRUSTED_RELAYS, and store the reference in the mls_keypackage_index table. Add tests that verify the published event is fetchable and indexed.",
+      "pre_existing": false,
+      "reviewers": [
+        "correctness"
+      ],
+      "#": 3
+    },
+    {
+      "title": "CI only builds releases; no test, lint, typecheck, or clippy gates",
+      "severity": "P1",
+      "file": ".github/workflows/main.yaml",
+      "line": 1,
+      "confidence": 100,
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "pre_existing": false,
+      "suggested_fix": "Add a `quality-gates` job before `publish-tauri` that runs `pnpm check`, `pnpm lint`, `pnpm test`, `cargo test`, and `cargo clippy -- -D warnings`; make the publish job `needs` it.",
+      "reviewers": [
+        "dev-velocity"
+      ],
+      "why_it_matters": null,
+      "evidence": null,
+      "#": 4
+    },
+    {
+      "title": "No CI runs on pull requests",
+      "severity": "P1",
+      "file": ".github/workflows/main.yaml",
+      "line": 3,
+      "confidence": 100,
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "pre_existing": false,
+      "suggested_fix": "Add `pull_request:` to the `on:` trigger, or create a separate `pr.yaml` workflow that runs the same quality gates.",
+      "reviewers": [
+        "dev-velocity"
+      ],
+      "why_it_matters": null,
+      "evidence": null,
+      "#": 5
+    },
+    {
+      "title": "SQLite database is not encrypted at rest",
+      "severity": "P1",
+      "file": "src-tauri/src/account_manager.rs",
+      "line": 478,
+      "why_it_matters": "The profile database is opened with plain rusqlite::Connection::open. While individual secret fields are encrypted, message metadata, contact graphs, profile fields, group membership, allowlists, and event tags are stored in plaintext. Anyone with filesystem access can read this sensitive data without knowing the PIN.",
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "confidence": 100,
+      "evidence": [
+        "account_manager.rs:478 `let conn = rusqlite::Connection::open(&db_path)`",
+        "Cargo.toml uses `rusqlite = { version = \"0.32\", features = [\"bundled\"] }` with no sqlcipher feature",
+        "account_manager.rs SQL_SCHEMA declares plaintext tables for profiles, chats, events, mls_groups, etc."
+      ],
+      "pre_existing": false,
+      "suggested_fix": "Enable SQLCipher (or libsql with encryption) for the bundled rusqlite build, or use a SQLCipher-backed connection, and derive the database key from the account PIN.",
+      "reviewers": [
+        "security"
+      ],
+      "#": 6
+    },
+    {
+      "title": "unsafe String::from_utf8_unchecked on decrypted ciphertext",
+      "severity": "P1",
+      "file": "src-tauri/src/crypto.rs",
+      "line": 159,
+      "why_it_matters": "internal_decrypt uses String::from_utf8_unchecked on plaintext produced by ChaCha20-Poly1305. Authenticated encryption only guarantees integrity, not that the original plaintext was valid UTF-8. A corrupted or maliciously modified ciphertext can trigger undefined behavior and panic paths.",
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "confidence": 100,
+      "evidence": [
+        "crypto.rs:155-160 `unsafe { Ok(String::from_utf8_unchecked(plaintext)) }` with a safety comment assuming valid UTF-8",
+        "The ciphertext path uses only `.len() >= 12` and `split_at(12)`; no version/tag-length checks"
+      ],
+      "pre_existing": false,
+      "suggested_fix": "Replace with fallible String::from_utf8 and return a DecodingError; treat non-UTF-8 plaintext as an integrity failure.",
+      "reviewers": [
+        "security"
+      ],
+      "#": 7
+    },
+    {
+      "title": "Export of recovery phrase and EVM keys requires no re-authentication",
+      "severity": "P1",
+      "file": "src-tauri/src/db.rs",
+      "line": 2164,
+      "why_it_matters": "get_seed and export_evm_account_key_plaintext only check that the cached global ENCRYPTION_KEY is in memory. If a session is already unlocked, any code that can invoke these commands can extract the recovery phrase or EVM private key without re-entering the PIN. This violates the expectation that exporting secrets is a high-risk action.",
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "confidence": 100,
+      "evidence": [
+        "db.rs:2164-2179 `get_seed` decrypts with `internal_decrypt(encrypted, None)` \u2014 no password parameter",
+        "evm_accounts.rs:582-590 `export_evm_account_key_plaintext` calls `resolve_private_key_hex_for_account_id` which also uses `internal_decrypt(..., None)`",
+        "src/lib/api/auth.ts exposes these as `exportRecoveryPhrase()` and `exportEvmAccountKeyPlaintext()`"
+      ],
+      "pre_existing": false,
+      "suggested_fix": "Add a mandatory `password: Option<String>` parameter to both export commands and require a fresh PIN/password before decrypting and returning secrets.",
+      "reviewers": [
+        "security"
+      ],
+      "#": 8
+    },
+    {
+      "title": "Pending message leaves stale row after ID update",
+      "severity": "P1",
+      "file": "src-tauri/src/db.rs",
+      "line": 3493,
+      "why_it_matters": "When a pending message is sent, its ID changes from a synthetic pending ID to the real event ID. save_event uses INSERT OR IGNORE, so the old pending=true row remains in the events table. After restart the UI loads both the pending and sent rows, showing duplicate messages.",
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "confidence": 100,
+      "evidence": [
+        "db.rs:3493-3520: save_event uses INSERT OR IGNORE, so existing rows are never overwritten.",
+        "message.rs:765-790: After a successful DM send the message ID is updated in state but the old pending DB row is never deleted.",
+        "mls.rs:1850-1900: After a successful MLS send the pending ID is updated to the real ID but no cleanup of the pending DB row occurs."
+      ],
+      "suggested_fix": "After confirming a send, DELETE the row whose id = pending_id, or use a single stable row ID from creation by updating the pending event in place instead of inserting a new row.",
+      "pre_existing": false,
+      "reviewers": [
+        "correctness"
+      ],
+      "#": 9
+    },
+    {
+      "title": "EVM signing and transaction commands have no user confirmation",
+      "severity": "P1",
+      "file": "src-tauri/src/lib.rs",
+      "line": 4487,
+      "why_it_matters": "sign_evm_hash, wallet_build_and_send_transaction, evm_send_advanced_contract_call, and evm_send_squad_allowlisted_contract_call all sign arbitrary data or send funds once the app is unlocked. There is no biometric, PIN, or explicit confirmation step. A malicious frontend script or compromised webview can drain funds or sign any 32-byte hash (e.g., an asset transfer authorization).",
+      "autofix_class": "manual",
+      "owner": "human",
+      "requires_verification": true,
+      "confidence": 100,
+      "evidence": [
+        "lib.rs:4487 `sign_evm_hash` signs any 64-char hex hash without confirmation",
+        "evm/wallet_ops.rs:392 `wallet_build_and_send_transaction` sends ETH/ERC-20 with no confirmation",
+        "evm/advanced_contract_call.rs:25 `evm_send_advanced_contract_call` signs arbitrary calldata",
+        "evm/squad_allowlist.rs:22 `evm_send_squad_allowlisted_contract_call` signs after allowlist check only"
+      ],
+      "pre_existing": false,
+      "suggested_fix": "Add a user-confirmation Tauri dialog (or OS-level confirmation) for all signing and sending commands; require PIN for the first use per session and clear the confirmation after a timeout.",
+      "reviewers": [
+        "security"
+      ],
+      "#": 10
+    },
+    {
+      "title": "MLS welcome and keypackage share kind value 443",
+      "severity": "P1",
+      "file": "src-tauri/src/stored_event.rs",
+      "line": 45,
+      "why_it_matters": "Code that branches on event_kind::MLS_WELCOME versus event_kind::MLS_KEY_PACKAGE cannot distinguish the two event types because both constants evaluate to 443. This causes mis-routing and mis-storage of welcome vs keypackage events.",
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "confidence": 100,
+      "evidence": [
+        "stored_event.rs:45-48: MLS_WELCOME and MLS_KEY_PACKAGE are both declared as 443."
+      ],
+      "suggested_fix": "Assign distinct kind values (e.g., keep MLS_WELCOME as 443 and move MLS_KEY_PACKAGE to a separate value such as 444), then audit all match sites that reference these constants.",
+      "pre_existing": false,
+      "reviewers": [
+        "correctness"
+      ],
+      "#": 11
+    },
+    {
+      "title": "Hex decoder silently corrupts invalid input",
+      "severity": "P1",
+      "file": "src-tauri/src/util.rs",
+      "line": 300,
+      "why_it_matters": "hex_string_to_bytes maps non-hex characters to 0 and ignores trailing characters on odd-length strings. A malformed encryption key, group ID, or EVM address will be accepted as a different value, causing wrong decryption keys, wrong group membership, or wrong addresses.",
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "confidence": 100,
+      "evidence": [
+        "util.rs:300-340: non-hex bytes fall through to 0, and the loop advances by 2 so an odd trailing character is dropped."
+      ],
+      "suggested_fix": "Change the function signature to return Result<Vec<u8>, String>, reject non-hex characters, and require an even-length input. Update all callers to handle the error.",
+      "pre_existing": false,
+      "reviewers": [
+        "correctness"
+      ],
+      "#": 12
+    },
+    {
+      "title": "Profiles store not reset on logout / account switch",
+      "severity": "P1",
+      "file": "src/lib/utils/clear-account-state.ts",
+      "line": 135,
+      "confidence": 100,
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "pre_existing": false,
+      "suggested_fix": "Add `profiles.set({})` and `profileLoadingStates.set({})` to `clearAccountState` so the next account cannot see the previous account's cached Nostr profiles.",
+      "reviewers": [
+        "frontend"
+      ],
+      "why_it_matters": null,
+      "evidence": null,
+      "#": 13
+    },
+    {
+      "title": "No integration or end-to-end test harness for the Tauri command contract",
+      "severity": "P1",
+      "file": "docs/plans/2026-06-27-001-feat-self-correcting-ai-testing-plan.md",
+      "line": 1,
+      "confidence": 95,
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "pre_existing": false,
+      "suggested_fix": "Implement the planned two-phase harness (Playwright mock build + WebdriverIO real Tauri) or add a minimal Rust integration test suite using `tauri::test` and a small Tauri command smoke test.",
+      "reviewers": [
+        "dev-velocity"
+      ],
+      "why_it_matters": null,
+      "evidence": null,
+      "#": 14
+    },
+    {
+      "title": "Rust backend has only ~62 tests across 63 source files; high-risk modules lack coverage",
+      "severity": "P1",
+      "file": "src-tauri/Cargo.toml",
+      "line": 1,
+      "confidence": 90,
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "pre_existing": false,
+      "suggested_fix": "Prioritize unit tests for `mls.rs`, `message.rs`, `chat.rs`, `account_manager.rs`, `profile_sync.rs`, `evm/wallet_ops.rs`, `evm/advanced_contract_call.rs`, `voice.rs`, and `net.rs`; consider a test coverage badge in CI.",
+      "reviewers": [
+        "dev-velocity"
+      ],
+      "why_it_matters": null,
+      "evidence": null,
+      "#": 15
+    },
+    {
+      "title": "Auto-updater endpoint points to legacy `covenant-application` repository",
+      "severity": "P1",
+      "file": "src-tauri/tauri.conf.json",
+      "line": 50,
+      "confidence": 90,
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "pre_existing": false,
+      "suggested_fix": "Update the updater endpoint to `https://github.com/covenant-gov/pacto-app/releases/latest/download/latest.json` and validate the public key matches the signing secret used in CI.",
+      "reviewers": [
+        "dev-velocity"
+      ],
+      "why_it_matters": null,
+      "evidence": null,
+      "#": 16
+    },
+    {
+      "title": "Message deduplication is non-atomic across DB and state",
+      "severity": "P1",
+      "file": "src-tauri/src/lib.rs",
+      "line": 1550,
+      "why_it_matters": "Two concurrent giftwraps for the same message can both pass the message_exists_in_db check before either is saved, then both be added to in-memory state. The duplicate ID check inside Chat::internal_add_message only protects the local Vec, not the DB, and cannot protect cross-task races.",
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "confidence": 75,
+      "evidence": [
+        "lib.rs:1550-1580: handle_text_message checks message_exists_in_db outside the STATE lock, then adds to STATE and later saves.",
+        "mls.rs:1170-1200: sync_group_since_cursor checks message_exists_in_db, drops the lock, then adds to STATE and saves."
+      ],
+      "suggested_fix": "Acquire a per-message or per-chat async lock around the check-add-save sequence, or make insertion conditional on the DB INSERT result and reconcile failures by rolling back the in-memory add.",
+      "pre_existing": false,
+      "reviewers": [
+        "correctness"
+      ],
+      "#": 17
+    },
+    {
+      "title": "MLS add-member merges commit before publish succeeds",
+      "severity": "P1",
+      "file": "src-tauri/src/mls.rs",
+      "line": 580,
+      "why_it_matters": "add_member_device calls engine.merge_pending_commit after client.send_event returns. If the evolution event fails to publish (e.g., all relays reject it), the local group advances to the next epoch while other members remain in the previous epoch, permanently breaking group state consistency.",
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "confidence": 75,
+      "evidence": [
+        "mls.rs:580-600: merge_pending_commit is invoked after client.send_event, and the send result is only logged with eprintln on failure."
+      ],
+      "suggested_fix": "Confirm the evolution event was accepted by at least one relay before merging; on failure, leave the pending commit unmerged and return an error so the caller can retry.",
+      "pre_existing": false,
+      "reviewers": [
+        "correctness"
+      ],
+      "#": 18
+    },
+    {
+      "title": "MLS send marks success without relay confirmation",
+      "severity": "P1",
+      "file": "src-tauri/src/mls.rs",
+      "line": 1850,
+      "why_it_matters": "client.send_event_to returns an Output that contains success and failed relay lists. The code only matches Ok/Err, so an Ok result with an empty success list (all relays rejected the message) is treated as a successful send. The UI shows sent but the message never reached the network.",
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "confidence": 75,
+      "evidence": [
+        "mls.rs:1850-1900: send_result is matched as Ok(_) without inspecting Output.success."
+      ],
+      "suggested_fix": "Inspect the Output's success list; if it is empty, treat the send as a failure, mark the message failed, and retry or surface the error to the user.",
+      "pre_existing": false,
+      "reviewers": [
+        "correctness"
+      ],
+      "#": 19
+    },
+    {
+      "title": "Release body is a placeholder and every release is published as a draft",
+      "severity": "P2",
+      "file": ".github/workflows/main.yaml",
+      "line": 107,
+      "confidence": 100,
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "pre_existing": false,
+      "suggested_fix": "Generate release notes from a `CHANGELOG.md` or from conventional commits; set `releaseDraft: false` once a review process is documented, or keep draft and require a human review step.",
+      "reviewers": [
+        "dev-velocity"
+      ],
+      "why_it_matters": null,
+      "evidence": null,
+      "#": 20
+    },
+    {
+      "title": "Panic paths on attacker-controlled or runtime data in crypto and messaging",
+      "severity": "P2",
+      "file": "src-tauri/src/crypto.rs",
+      "line": 38,
+      "why_it_matters": "Multiple unwrap/expect calls in crypto.rs and message.rs can panic on malformed input. For example, crypto::encrypt_data unwraps hex decoding, and message.rs uses expect/unwrap for the Nostr client, signer, public key, and state lookup. A crafted message or corrupted database entry can crash the backend, causing denial of service or leaving corrupted state.",
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "confidence": 100,
+      "evidence": [
+        "crypto.rs:38-39 `hex::decode(...).unwrap()` in encrypt_data",
+        "crypto.rs:69 `Params::new(...).unwrap()`",
+        "crypto.rs:79 `argon.hash_password_into(...).unwrap()`",
+        "crypto.rs:89 `crate::ENCRYPTION_KEY.get().unwrap()`",
+        "crypto.rs:100 `ChaCha20Poly1305::new_from_slice(key).expect(...)`",
+        "message.rs:309-311 `get_nostr_client().expect(...)`, `client.signer().await.unwrap()`, `signer.get_public_key().await.unwrap()`",
+        "message.rs:419 `let attached_file = file.unwrap();`",
+        "message.rs:512 `crypto::encrypt_data(...).unwrap()`"
+      ],
+      "pre_existing": false,
+      "suggested_fix": "Convert unwrap/expect in command and protocol paths to Result propagation; reserve expect for programmer-invariant checks that are truly unreachable.",
+      "reviewers": [
+        "security"
+      ],
+      "#": 21
+    },
+    {
+      "title": "Login/create account commands return plaintext secrets to frontend",
+      "severity": "P2",
+      "file": "src-tauri/src/lib.rs",
+      "line": 3961,
+      "why_it_matters": "create_account and login return a LoginKeyPair containing the nsec (private) and the EVM private key. The frontend then encrypts them with the PIN, but during the round-trip the secrets are exposed in the webview/IPC layer. If the frontend is compromised or IPC is traced, the keys leak before they are encrypted.",
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "confidence": 100,
+      "evidence": [
+        "lib.rs:4214-4237 `encrypt` command returns plaintext and also saves seed via `db::set_seed`",
+        "lib.rs:4437-4458 `create_account` returns `LoginKeyPair { private: ..., evm_private_key: ... }`",
+        "lib.rs:4105-4138 `login` returns `LoginKeyPair { private: ..., evm_private_key: ... }`",
+        "src/lib/api/auth.ts defines `LoginKeyPair` with optional `evm_private_key`"
+      ],
+      "pre_existing": false,
+      "suggested_fix": "Encrypt secrets inside the Rust backend using the PIN passed directly to the backend, and return only the public npub/address to the frontend. Avoid sending private keys over IPC.",
+      "reviewers": [
+        "security"
+      ],
+      "#": 22
+    },
+    {
+      "title": "Runtime panic in message attachment save path",
+      "severity": "P2",
+      "file": "src-tauri/src/message.rs",
+      "line": 540,
+      "why_it_matters": "The attachment send path uses unwrap on path resolution, directory creation, and file writes. If the filesystem is unavailable or permissions are wrong, the entire Tauri command panics instead of returning a controlled error to the frontend.",
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "confidence": 100,
+      "evidence": [
+        "message.rs:540-550: handle.path().resolve(...).unwrap(), create_dir_all(...).unwrap(), write(...).unwrap()."
+      ],
+      "suggested_fix": "Replace unwrap with ? propagation and map errors to String so the command returns a usable error and the frontend can show a failure state.",
+      "pre_existing": false,
+      "reviewers": [
+        "correctness"
+      ],
+      "#": 23
+    },
+    {
+      "title": "MLS sync processed counter double-increments",
+      "severity": "P2",
+      "file": "src-tauri/src/mls.rs",
+      "line": 1050,
+      "why_it_matters": "In sync_group_since_cursor, processed is incremented inside the Commit/Proposal arms and again at the end of the Ok arm. The returned processed count is inflated and misleads sync progress and metrics.",
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "confidence": 100,
+      "evidence": [
+        "mls.rs:1050-1100: processed += 1 appears inside the Commit and Proposal branches and again after the match expression."
+      ],
+      "suggested_fix": "Remove the trailing processed += 1 so each event is counted exactly once.",
+      "pre_existing": false,
+      "reviewers": [
+        "correctness"
+      ],
+      "#": 24
+    },
+    {
+      "title": "Attachment download lacks SSRF protection",
+      "severity": "P2",
+      "file": "src-tauri/src/net.rs",
+      "line": 80,
+      "why_it_matters": "download_with_reporter in net.rs is used to fetch attachment payloads from URLs supplied by other users. Unlike image_cache.rs, it does not validate schemes, block private hosts, or block DNS-rebinding targets. A malicious attachment URL can probe internal services (e.g., http://localhost:8545, http://169.254.169.254) or enumerate the local network.",
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "confidence": 100,
+      "evidence": [
+        "net.rs:80-142 `download_with_reporter` accepts any `content_url` and performs HEAD/GET/RANGE requests",
+        "net.rs:149-178 `supports_range` does not validate URL safety",
+        "rumor.rs:341-347 `process_file_attachment` stores `content_url` and later passes it to `net::download`",
+        "image_cache.rs:527-531 has a private-host check but net.rs does not reuse it"
+      ],
+      "pre_existing": false,
+      "suggested_fix": "Re-use the image_cache SSRF checks (HTTPS-only, private-host block, no userinfo) for all attachment downloads; additionally resolve hostnames and block addresses that resolve to private/link-local IPs.",
+      "reviewers": [
+        "security"
+      ],
+      "#": 25
+    },
+    {
+      "title": "Profile sync queue caches failures as successes",
+      "severity": "P2",
+      "file": "src-tauri/src/profile_sync.rs",
+      "line": 230,
+      "why_it_matters": "profile::load_profile is called and its return value is ignored. mark_done is always called after the await, which records last_fetched as now. A network failure or relay timeout therefore causes the profile to be skipped for the entire cache window, leaving stale or missing metadata.",
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "confidence": 100,
+      "evidence": [
+        "profile_sync.rs:230-240: load_profile(entry.npub.clone()).await; result is discarded, then mark_done unconditionally."
+      ],
+      "suggested_fix": "Only call mark_done when load_profile returns true; on failure, either leave the entry in the queue or requeue it with a short backoff and increment a retry counter.",
+      "pre_existing": false,
+      "reviewers": [
+        "correctness"
+      ],
+      "#": 26
+    },
+    {
+      "title": "MESSAGE_EDIT is not a known kind in StoredEvent",
+      "severity": "P2",
+      "file": "src-tauri/src/stored_event.rs",
+      "line": 120,
+      "why_it_matters": "is_known_kind() matches only DM, file, reaction, and application-specific kinds. Edit events are fully supported but classified as unknown, which can cause them to be rendered as placeholder events or handled inconsistently.",
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "confidence": 100,
+      "evidence": [
+        "stored_event.rs:120-130: is_known_kind matches event_kind::PRIVATE_DIRECT_MESSAGE, FILE_ATTACHMENT, REACTION, APPLICATION_SPECIFIC but not MESSAGE_EDIT."
+      ],
+      "suggested_fix": "Add event_kind::MESSAGE_EDIT to the is_known_kind match and verify that edit events are no longer treated as unknown.",
+      "pre_existing": false,
+      "reviewers": [
+        "correctness"
+      ],
+      "#": 27
+    },
+    {
+      "title": "post-login sync fires uncoordinated fire-and-forget tasks",
+      "severity": "P2",
+      "file": "src/lib/app/post-login-sync.ts",
+      "line": 11,
+      "confidence": 100,
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "pre_existing": false,
+      "suggested_fix": "Coordinate connect/fetch/profile-sync/MLS-sync in a single async sequence with a loading flag and user-facing error on critical failure.",
+      "reviewers": [
+        "frontend"
+      ],
+      "why_it_matters": null,
+      "evidence": null,
+      "#": 28
+    },
+    {
+      "title": "Tauri event payloads cast with `as` instead of validated",
+      "severity": "P2",
+      "file": "src/lib/app/tauri-subscriptions.ts",
+      "line": 75,
+      "confidence": 100,
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "pre_existing": false,
+      "suggested_fix": "Add runtime validation (e.g. zod) for each event payload and use a shared typed event contract with Rust.",
+      "reviewers": [
+        "frontend"
+      ],
+      "why_it_matters": null,
+      "evidence": null,
+      "#": 29
+    },
+    {
+      "title": "Svelte 5 project still uses legacy reactive statements with side effects",
+      "severity": "P2",
+      "file": "src/routes/+page.svelte",
+      "line": 515,
+      "confidence": 100,
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "pre_existing": false,
+      "suggested_fix": "Migrate side-effect reactive blocks (`$: if ...`) to `$effect` runes and pure derived stores; keep components in legacy mode only where necessary.",
+      "reviewers": [
+        "frontend"
+      ],
+      "why_it_matters": null,
+      "evidence": null,
+      "#": 30
+    },
+    {
+      "title": "loadOlder advances offset by page size even when fewer messages are returned",
+      "severity": "P2",
+      "file": "src/routes/+page.svelte",
+      "line": 713,
+      "confidence": 100,
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "pre_existing": false,
+      "suggested_fix": "Advance the offset by `older.length` instead of `LOAD_OLDER_PAGE_SIZE` so no messages are skipped at the tail of the history.",
+      "reviewers": [
+        "frontend"
+      ],
+      "why_it_matters": null,
+      "evidence": null,
+      "#": 31
+    },
+    {
+      "title": "Auth errors surfaced as raw error.message strings",
+      "severity": "P2",
+      "file": "src/stores/auth.ts",
+      "line": 96,
+      "confidence": 100,
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "pre_existing": false,
+      "suggested_fix": "Use `getInvokeErrorMessage(e, 'Failed to check auth status')` in all auth catch blocks instead of `error.message`.",
+      "reviewers": [
+        "frontend"
+      ],
+      "why_it_matters": null,
+      "evidence": null,
+      "#": 32
+    },
+    {
+      "title": "reconcilePeerThreadInvites mutates another store inside `update`",
+      "severity": "P2",
+      "file": "src/stores/dm.ts",
+      "line": 260,
+      "confidence": 100,
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "pre_existing": false,
+      "suggested_fix": "Compute the new inbox snapshot from the closure, then call `pactoAppInboxMessages.set(...)` after `backendDmMessages.update(...)` returns.",
+      "reviewers": [
+        "frontend"
+      ],
+      "why_it_matters": null,
+      "evidence": null,
+      "#": 33
+    },
+    {
+      "title": "loadProfile uses a fixed 500ms sleep for background fetch",
+      "severity": "P2",
+      "file": "src/stores/profiles.ts",
+      "line": 218,
+      "confidence": 100,
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "pre_existing": false,
+      "suggested_fix": "Replace the sleep with a promise-based waiter keyed by npub (e.g. backend resolves when the profile is ready, or a timeout with exponential backoff).",
+      "reviewers": [
+        "frontend"
+      ],
+      "why_it_matters": null,
+      "evidence": null,
+      "#": 34
+    },
+    {
+      "title": "safe.ts asserts unsafe address string as viem Address",
+      "severity": "P2",
+      "file": "src/stores/safe.ts",
+      "line": 80,
+      "confidence": 100,
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "pre_existing": false,
+      "suggested_fix": "Validate `entry.safeAddress` with `isAddress` before passing it to `getSafeState`; return early or record an error if invalid.",
+      "reviewers": [
+        "frontend"
+      ],
+      "why_it_matters": null,
+      "evidence": null,
+      "#": 35
+    },
+    {
+      "title": "ESLint config uses only recommended presets and there is no formatting script or Prettier config",
+      "severity": "P2",
+      "file": "eslint.config.js",
+      "line": 1,
+      "confidence": 95,
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "pre_existing": false,
+      "suggested_fix": "Add Prettier and a `format`/`format:check` script; extend `typescript-eslint` type-aware recommended rules and add `eslint-plugin-import` for import/order consistency.",
+      "reviewers": [
+        "dev-velocity"
+      ],
+      "why_it_matters": null,
+      "evidence": null,
+      "#": 36
+    },
+    {
+      "title": "`tauri-plugin-mcp-bridge` is a non-optional dependency in Cargo.toml despite being described as debug-only",
+      "severity": "P2",
+      "file": "src-tauri/Cargo.toml",
+      "line": 100,
+      "confidence": 95,
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "pre_existing": false,
+      "suggested_fix": "Move `tauri-plugin-mcp-bridge` to `[target.'cfg(debug_assertions)'.dependencies]` or make it an optional feature and only enable it in debug builds; verify release binaries do not link the plugin.",
+      "reviewers": [
+        "dev-velocity"
+      ],
+      "why_it_matters": null,
+      "evidence": null,
+      "#": 37
+    },
+    {
+      "title": "`ALCHEMY_` env prefix exposes the backend RPC secret to the webview bundle",
+      "severity": "P2",
+      "file": "vite.config.ts",
+      "line": 14,
+      "confidence": 95,
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "pre_existing": false,
+      "suggested_fix": "Remove `ALCHEMY_` from `envPrefix` in `vite.config.ts`; the Rust backend already reads `ALCHEMY_RPC_KEY` from the process environment.",
+      "reviewers": [
+        "dev-velocity"
+      ],
+      "why_it_matters": null,
+      "evidence": null,
+      "#": 38
+    },
+    {
+      "title": "Frontend coverage thresholds are set but not enforced by CI; Svelte components are excluded from coverage",
+      "severity": "P2",
+      "file": "vite.config.ts",
+      "line": 42,
+      "confidence": 95,
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "pre_existing": false,
+      "suggested_fix": "Add a CI step that runs `pnpm test:coverage` and gates on the 80% thresholds; add component-level tests or remove the `src/**/*.svelte` exclusion so coverage reflects real UI code.",
+      "reviewers": [
+        "dev-velocity"
+      ],
+      "why_it_matters": null,
+      "evidence": null,
+      "#": 39
+    },
+    {
+      "title": "No tracked changelog or release notes file",
+      "severity": "P2",
+      "file": "docs/README.md",
+      "line": 1,
+      "confidence": 90,
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "pre_existing": false,
+      "suggested_fix": "Add a `CHANGELOG.md` at the repo root and update the CI workflow to populate `releaseBody` from it.",
+      "reviewers": [
+        "dev-velocity"
+      ],
+      "why_it_matters": null,
+      "evidence": null,
+      "#": 40
+    },
+    {
+      "title": "Alpha-only legacy-fix docs and repair code still live in the codebase",
+      "severity": "P2",
+      "file": "docs/legacy-fixes/CATALOG.md",
+      "line": 1,
+      "confidence": 90,
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "pre_existing": false,
+      "suggested_fix": "Remove the `docs/legacy-fixes/` directory and the LF-001/LF-002/LF-003 repair branches in `db.rs`, `wallet_ops.rs`, and `watched-tokens.ts`; move any retained historical context into the relevant design docs.",
+      "reviewers": [
+        "dev-velocity"
+      ],
+      "why_it_matters": null,
+      "evidence": null,
+      "#": 41
+    },
+    {
+      "title": "Deep-link handler still references legacy `vector://` and `vectorapp.io` schemes",
+      "severity": "P2",
+      "file": "src-tauri/src/lib.rs",
+      "line": 6174,
+      "confidence": 90,
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "pre_existing": false,
+      "suggested_fix": "Update the single-instance deep-link filter to `pacto://` or the current product domain; update the `TRUSTED_RELAYS` entries that still point to `asia.vectorapp.io` if they are meant to be Pacto relays.",
+      "reviewers": [
+        "dev-velocity"
+      ],
+      "why_it_matters": null,
+      "evidence": null,
+      "#": 42
+    },
+    {
+      "title": "`.cursor/rules` is missing critical policies for lock discipline, tests, env vars, and global state",
+      "severity": "P2",
+      "file": ".cursor/rules/brief-inline-commentary.mdc",
+      "line": 1,
+      "confidence": 85,
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "requires_verification": false,
+      "pre_existing": false,
+      "suggested_fix": "Add `.cursor/rules` files: keep `pnpm-lock.yaml` and `Cargo.lock` in sync; add tests for every new Tauri command; new Vite env vars must be `VITE_` or `ALCHEMY_`; avoid new `lazy_static`/`OnceCell` globals.",
+      "reviewers": [
+        "dev-velocity"
+      ],
+      "why_it_matters": null,
+      "evidence": null,
+      "#": 43
+    },
+    {
+      "title": "No dedicated AI onboarding doc for adding Tauri commands, stores, or EVM/MLS features",
+      "severity": "P2",
+      "file": "docs/README.md",
+      "line": 1,
+      "confidence": 85,
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "requires_verification": false,
+      "pre_existing": false,
+      "suggested_fix": "Create `docs/AI_ONBOARDING.md` with step-by-step checklists for adding a Tauri command, adding a store, adding an EVM contract binding, and adding an MLS feature, plus how to test each.",
+      "reviewers": [
+        "dev-velocity"
+      ],
+      "why_it_matters": null,
+      "evidence": null,
+      "#": 44
+    },
+    {
+      "title": "Account switch races between account and ID caches",
+      "severity": "P2",
+      "file": "src-tauri/src/account_manager.rs",
+      "line": 1260,
+      "why_it_matters": "switch_account calls set_current_account before clearing and reloading the chat/user ID caches. Any concurrent DB operation that uses the current account and the cache could read stale cache entries against the newly selected account's database.",
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "confidence": 75,
+      "evidence": [
+        "account_manager.rs:1260-1280: set_current_account is invoked, then db::clear_id_caches and preload run."
+      ],
+      "suggested_fix": "Clear the caches before changing the current account, or hold a single account-switch mutex so no DB operation can run between the account change and cache reload.",
+      "pre_existing": false,
+      "reviewers": [
+        "correctness"
+      ],
+      "#": 45
+    },
+    {
+      "title": "SQLite connection not returned on query error",
+      "severity": "P2",
+      "file": "src-tauri/src/db.rs",
+      "line": 3128,
+      "why_it_matters": "Functions such as get_dm_sent_received return Err before returning the connection to the pool. Because the pool holds only one connection per account, repeated errors exhaust the pool and block all subsequent DB operations.",
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "confidence": 75,
+      "evidence": [
+        "db.rs:3128-3142: get_dm_sent_received returns the query error before return_db_connection is called."
+      ],
+      "suggested_fix": "Introduce a RAII guard that returns the connection on Drop, or use a closure pattern that always returns the connection before propagating the result.",
+      "pre_existing": false,
+      "reviewers": [
+        "correctness"
+      ],
+      "#": 46
+    },
+    {
+      "title": "Edit timestamps lack millisecond precision",
+      "severity": "P2",
+      "file": "src-tauri/src/db.rs",
+      "line": 4070,
+      "why_it_matters": "get_message_views builds edit history using event.created_at * 1000, ignoring the ms tag. Multiple edits in the same second cannot be ordered correctly and may display out of order.",
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "confidence": 75,
+      "evidence": [
+        "db.rs:4070-4080: timestamp_ms = event.created_at * 1000 for edits, while messages use event.timestamp_ms()."
+      ],
+      "suggested_fix": "Use event.timestamp_ms() for edit timestamps, consistent with how message timestamps are reconstructed.",
+      "pre_existing": false,
+      "reviewers": [
+        "correctness"
+      ],
+      "#": 47
+    },
+    {
+      "title": "EVM transactions lack explicit chain_id",
+      "severity": "P2",
+      "file": "src-tauri/src/evm/wallet_ops.rs",
+      "line": 370,
+      "why_it_matters": "wallet_build_and_send_transaction constructs a TransactionRequest without .with_chain_id. If the RPC provider is misconfigured or the signer is on a different network, the transaction can be signed for the wrong chain and rejected or, worse, replayed on an unintended network.",
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "confidence": 75,
+      "evidence": [
+        "wallet_ops.rs:340-380: TransactionRequest is built with to/value/input but never chain_id."
+      ],
+      "suggested_fix": "Call .with_chain_id(net.chain_id) on the TransactionRequest before sending, and verify the returned receipt's chain_id matches.",
+      "pre_existing": false,
+      "reviewers": [
+        "correctness"
+      ],
+      "#": 48
+    },
+    {
+      "title": "Auto-accept of squad channel invites based on DM content only",
+      "severity": "P2",
+      "file": "src-tauri/src/lib.rs",
+      "line": 1566,
+      "why_it_matters": "handle_text_message parses any incoming DM as a channel_in_squad invitation and auto-accepts the MLS welcome if the announcements_group_id matches a known local squad. The sender is not verified to be an admin or authorized inviter of that squad. A user who has the user's npub can send a crafted DM and force the user into a channel without consent.",
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "confidence": 75,
+      "evidence": [
+        "lib.rs:1566-1605 `handle_text_message` auto-accepts when `parse_channel_in_squad_dm` succeeds and `in_squad` is true",
+        "lib.rs:5630-5648 `parse_channel_in_squad_dm` only validates JSON shape and type string",
+        "No check that `sender` or `contact` is an admin/member authorized to add channels to the squad"
+      ],
+      "pre_existing": false,
+      "suggested_fix": "Before auto-accepting, verify the DM sender is a member of the announcements group (or otherwise authorized) and that the channel_group_id is a valid welcome from the welcomer known to the squad.",
+      "reviewers": [
+        "security"
+      ],
+      "#": 49
+    },
+    {
+      "title": "Giftwrap unwrap failures are silently dropped",
+      "severity": "P2",
+      "file": "src-tauri/src/lib.rs",
+      "line": 1600,
+      "why_it_matters": "handle_event matches client.unwrap_gift_wrap with Err(_) => false. A legitimate message that fails to decrypt is discarded without any log, making it impossible to debug relay or key issues.",
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "confidence": 75,
+      "evidence": [
+        "lib.rs:1600-1605: the Err arm of unwrap_gift_wrap returns false and does not log."
+      ],
+      "suggested_fix": "Log the error reason (without message content or keys) and consider recording a metric for failed unwraps so QA can detect patterns.",
+      "pre_existing": false,
+      "reviewers": [
+        "correctness"
+      ],
+      "#": 50
+    },
+    {
+      "title": "MLS live messages do not advance sync cursor",
+      "severity": "P2",
+      "file": "src-tauri/src/lib.rs",
+      "line": 1904,
+      "why_it_matters": "The live MLS group-message handler processes new messages but never writes to mls_event_cursors. The next explicit sync therefore re-fetches from the old cursor, reprocessing messages that were already handled and creating unnecessary state churn.",
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "confidence": 75,
+      "evidence": [
+        "lib.rs:1904-2200: the notifs handler processes MLS ApplicationMessage results but never calls save_mls_event_cursor or equivalent."
+      ],
+      "suggested_fix": "After successfully processing an MLS message, update mls_event_cursors with the latest wrapper event id and timestamp so subsequent syncs can resume from the correct position.",
+      "pre_existing": false,
+      "reviewers": [
+        "correctness"
+      ],
+      "#": 51
+    },
+    {
+      "title": "Pending message ID can collide on rapid sends",
+      "severity": "P2",
+      "file": "src-tauri/src/message.rs",
+      "line": 300,
+      "why_it_matters": "The pending_id is derived from SystemTime::now().as_nanos(). If two messages are created in the same nanosecond, they receive the same ID, and subsequent state updates will target whichever message was found first.",
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "confidence": 75,
+      "evidence": [
+        "message.rs:300-310: pending_id = String::from(\"pending-\") + current_time.as_nanos().to_string()."
+      ],
+      "suggested_fix": "Include a monotonic counter or UUID in the pending ID so that two rapid sends cannot collide.",
+      "pre_existing": false,
+      "reviewers": [
+        "correctness"
+      ],
+      "#": 52
+    },
+    {
+      "title": "Attachment plaintext written before dedup/reuse decision",
+      "severity": "P2",
+      "file": "src-tauri/src/message.rs",
+      "line": 530,
+      "why_it_matters": "The plaintext file is written to disk and the directory created before the code decides whether an existing attachment URL will be reused. This writes unencrypted data unnecessarily, wastes disk space, and may leak plaintext files even when no upload occurs.",
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "confidence": 75,
+      "evidence": [
+        "message.rs:530-550: std::fs::create_dir_all and std::fs::write are called before will_reuse_existing is evaluated."
+      ],
+      "suggested_fix": "Move the file write to after the reuse decision and only write the plaintext when a new upload is actually required.",
+      "pre_existing": false,
+      "reviewers": [
+        "correctness"
+      ],
+      "#": 53
+    },
+    {
+      "title": "MLS group creation can omit members silently",
+      "severity": "P2",
+      "file": "src-tauri/src/mls.rs",
+      "line": 350,
+      "why_it_matters": "create_group loops over requested members and skips any whose keypackage cannot be resolved, then proceeds to create the group. The UI preflight is supposed to prevent this, but the backend still allows partial creation, which can surprise users and leave members without access.",
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "confidence": 75,
+      "evidence": [
+        "mls.rs:350-360: missing keypackage logs a warning and continues; group creation proceeds with invited_count = member_kp_events.len()."
+      ],
+      "suggested_fix": "Return an error if any requested member cannot be resolved, making group creation atomic, or at least require explicit confirmation from the caller for partial creation.",
+      "pre_existing": false,
+      "reviewers": [
+        "correctness"
+      ],
+      "#": 54
+    },
+    {
+      "title": "Local MLS group metadata deleted before leave commit is published",
+      "severity": "P2",
+      "file": "src-tauri/src/mls.rs",
+      "line": 640,
+      "why_it_matters": "leave_group calls client.send_event and then immediately removes the group from mls_groups. If the event fails to publish, the local group is gone but the network still treats the user as a member, so the user will still receive group messages and cannot rejoin cleanly.",
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "confidence": 75,
+      "evidence": [
+        "mls.rs:640-660: groups.retain removes the group immediately after send_event, without confirming acceptance."
+      ],
+      "suggested_fix": "Confirm the leave proposal was accepted by at least one relay before removing local metadata; on failure, return an error and keep the group.",
+      "pre_existing": false,
+      "reviewers": [
+        "correctness"
+      ],
+      "#": 55
+    },
+    {
+      "title": "MLS operations re-enter Tokio runtime from blocking pool",
+      "severity": "P2",
+      "file": "src-tauri/src/mls.rs",
+      "line": 1750,
+      "why_it_matters": "send_mls_message and the live MLS handler use tokio::task::spawn_blocking and then immediately call rt.block_on. This defeats the blocking pool, risks deadlocks, and can panic when block_on is called from within the async runtime's own threads.",
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "confidence": 75,
+      "evidence": [
+        "mls.rs:1750-1760: send_mls_message spawns a blocking task and then block_on's the async work.",
+        "lib.rs:1904-2200: notifs handler does the same for live MLS messages."
+      ],
+      "suggested_fix": "Refactor MlsService so that engine calls happen in a dedicated thread that communicates via channels, or make the engine itself Send-friendly so it can be used directly in async commands without spawn_blocking/block_on.",
+      "pre_existing": false,
+      "reviewers": [
+        "correctness"
+      ],
+      "#": 56
+    },
+    {
+      "title": "Attachment filename extension from attacker-controlled tag enables path traversal",
+      "severity": "P2",
+      "file": "src-tauri/src/rumor.rs",
+      "line": 341,
+      "why_it_matters": "process_file_attachment builds the local save path from the file-type tag by calling extension_from_mime. extension_from_mime's fallback returns the raw MIME subtype, which can contain path separators (e.g., \"application/../../evil\"). An attacker can craft a file attachment event that writes downloaded files outside the intended vector directory.",
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "confidence": 75,
+      "evidence": [
+        "rumor.rs:341-347 `let extension = crate::util::extension_from_mime(mime_type);` then `dir.join(format!(\"{}.{}, ...`",
+        "util.rs:821-836 `extension_from_mime` falls back to `lower.split('/').nth(1).unwrap_or(\"bin\")` without sanitization",
+        "rumor.rs:363-370 `let hash_file_path = dir.join(format!(\"{}.{}, ox_hash, extension));`"
+      ],
+      "pre_existing": false,
+      "suggested_fix": "Sanitize the extension to only allow alphanumeric and a small allow-list of safe characters (e.g., [a-zA-Z0-9]), and validate the final path is still inside the resolved base directory before writing.",
+      "reviewers": [
+        "security"
+      ],
+      "#": 57
+    },
+    {
+      "title": "Reactions may reference wrong message with multiple e-tags",
+      "severity": "P2",
+      "file": "src-tauri/src/rumor.rs",
+      "line": 430,
+      "why_it_matters": "process_reaction calls rumor.tags.find(TagKind::e()) which returns the first e-tag. If the reaction event references a root event plus a reply event, the reaction may be attached to the root instead of the intended message.",
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "confidence": 75,
+      "evidence": [
+        "rumor.rs:430-440: reference_tag is the first e-tag, regardless of reply marker."
+      ],
+      "suggested_fix": "Select the e-tag with the 'reply' marker, or fall back to the last e-tag if no marker is present, matching NIP-25 conventions.",
+      "pre_existing": false,
+      "reviewers": [
+        "correctness"
+      ],
+      "#": 58
+    },
+    {
+      "title": "ChatView membership-version reactive reloads members repeatedly",
+      "severity": "P2",
+      "file": "src/components/channel/ChatView.svelte",
+      "line": 205,
+      "confidence": 75,
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "pre_existing": false,
+      "suggested_fix": "Track the last loaded version per groupId and only call `loadChannelMembers()` when `$membershipVersionByGroupId[gid]` changes.",
+      "reviewers": [
+        "frontend"
+      ],
+      "why_it_matters": null,
+      "evidence": null,
+      "#": 59
+    },
+    {
+      "title": "ChatView sends all non-inbox messages with virtualBucket 'announcements'",
+      "severity": "P2",
+      "file": "src/components/channel/ChatView.svelte",
+      "line": 284,
+      "confidence": 75,
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "pre_existing": false,
+      "suggested_fix": "Derive the `virtualBucket` from `activeChannel.name` (announcements/inbox/polls) instead of hardcoding announcements.",
+      "reviewers": [
+        "frontend"
+      ],
+      "why_it_matters": null,
+      "evidence": null,
+      "#": 60
+    },
+    {
+      "title": "DmThread side-effect reactive block processes wallet grants on every message update",
+      "severity": "P2",
+      "file": "src/components/dm/DmThread.svelte",
+      "line": 110,
+      "confidence": 75,
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "pre_existing": false,
+      "suggested_fix": "Move the wallet-grant processing into an action triggered by new messages only, and clean up pending `setDmPeerEvmAddress` promises on component unmount.",
+      "reviewers": [
+        "frontend"
+      ],
+      "why_it_matters": null,
+      "evidence": null,
+      "#": 61
+    },
+    {
+      "title": "ExportAllSecretsModal keeps decrypted secrets in component memory",
+      "severity": "P2",
+      "file": "src/components/settings/ExportAllSecretsModal.svelte",
+      "line": 44,
+      "confidence": 75,
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "pre_existing": false,
+      "suggested_fix": "Clear the `bundle` object and `revealed` set immediately when the modal closes or on unmount; consider never storing the full bundle in a single object.",
+      "reviewers": [
+        "frontend"
+      ],
+      "why_it_matters": null,
+      "evidence": null,
+      "#": 62
+    },
+    {
+      "title": "DM load in +page.svelte is uncancellable and races on rapid conversation switches",
+      "severity": "P2",
+      "file": "src/routes/+page.svelte",
+      "line": 620,
+      "confidence": 75,
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "pre_existing": false,
+      "suggested_fix": "Track a per-npub request token or AbortController and ignore responses for conversations that are no longer active.",
+      "reviewers": [
+        "frontend"
+      ],
+      "why_it_matters": null,
+      "evidence": null,
+      "#": 63
+    },
+    {
+      "title": "Module-level Tauri listeners in profiles.ts can stack across HMR",
+      "severity": "P2",
+      "file": "src/stores/profiles.ts",
+      "line": 87,
+      "confidence": 75,
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "pre_existing": false,
+      "suggested_fix": "Register all listeners in a single async setup function with a shared `Map<string, UnlistenFn>` and call previous unlisteners before re-registering.",
+      "reviewers": [
+        "frontend"
+      ],
+      "why_it_matters": null,
+      "evidence": null,
+      "#": 64
+    },
+    {
+      "title": "AGENTS.md references a non-existent `install.sh` at the repo root",
+      "severity": "P3",
+      "file": "AGENTS.md",
+      "line": 205,
+      "confidence": 100,
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": false,
+      "pre_existing": false,
+      "suggested_fix": "Remove the stale `install.sh` reference from AGENTS.md, or add the intended `install.sh` script if it is still needed.",
+      "reviewers": [
+        "dev-velocity"
+      ],
+      "why_it_matters": null,
+      "evidence": null,
+      "#": 65
+    },
+    {
+      "title": "lib.rs and db.rs violate single-responsibility",
+      "severity": "P3",
+      "file": "src-tauri/src/lib.rs",
+      "line": 1,
+      "why_it_matters": "lib.rs is approximately 6,475 lines and db.rs is approximately 4,307 lines. These modules contain command registries, event pipelines, sync logic, migrations, query helpers, and view composition all mixed together, which slows review, increases merge conflicts, and hides dependencies.",
+      "autofix_class": "manual",
+      "owner": "human",
+      "requires_verification": true,
+      "confidence": 100,
+      "evidence": [
+        "lib.rs: ~6475 lines of command handlers and event processing.",
+        "db.rs: ~4307 lines containing schema/migrations, query helpers, and message view composition."
+      ],
+      "suggested_fix": "Split db.rs into modules: schema/migrations, chat queries, message queries, profile queries, MLS queries, and event views. Split lib.rs into feature modules: chat, sync, mls, notifications, and commands. Keep lib.rs as a thin command registry and module aggregator.",
+      "pre_existing": false,
+      "reviewers": [
+        "correctness"
+      ],
+      "#": 66
+    },
+    {
+      "title": "MessengerChatView optimistic message IDs can collide",
+      "severity": "P3",
+      "file": "src/components/dm/MessengerChatView.svelte",
+      "line": 57,
+      "confidence": 100,
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "pre_existing": false,
+      "suggested_fix": "Include a random component in the optimistic ID, e.g. `opt-${Date.now()}-${Math.random().toString(36).slice(2)}`.",
+      "reviewers": [
+        "frontend"
+      ],
+      "why_it_matters": null,
+      "evidence": null,
+      "#": 67
+    },
+    {
+      "title": "DashboardPollsPanel uses unsafe cast and voids a reactive dependency",
+      "severity": "P3",
+      "file": "src/components/parent/DashboardPollsPanel.svelte",
+      "line": 90,
+      "confidence": 100,
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "pre_existing": false,
+      "suggested_fix": "Give `getPollBallotMap` a typed return and remove the `as Record<string, string>` cast; also remove the unnecessary `void pollBallotRefresh`.",
+      "reviewers": [
+        "frontend"
+      ],
+      "why_it_matters": null,
+      "evidence": null,
+      "#": 68
+    },
+    {
+      "title": "No Makefile, justfile, or `scripts/` directory for common development tasks",
+      "severity": "P3",
+      "file": "package.json",
+      "line": 5,
+      "confidence": 95,
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "requires_verification": false,
+      "pre_existing": false,
+      "suggested_fix": "Add a `justfile` or `scripts/dev.sh` that wraps common workflows (`pnpm tauri:dev`, `pnpm check`, `cargo test`, `pnpm test:coverage`) with consistent flags.",
+      "reviewers": [
+        "dev-velocity"
+      ],
+      "why_it_matters": null,
+      "evidence": null,
+      "#": 69
+    },
+    {
+      "title": "Image cache SSRF protection is vulnerable to DNS rebinding",
+      "severity": "P3",
+      "file": "src-tauri/src/image_cache.rs",
+      "line": 528,
+      "why_it_matters": "is_private_host only blocks obvious hostnames and literal IP addresses; it does not resolve hostnames to IP addresses. An attacker can use a hostname that resolves to a private IP (DNS rebinding) to fetch internal images or probe internal services via the image cache.",
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "confidence": 75,
+      "evidence": [
+        "image_cache.rs:528-531 `is_private_host` blocks 'localhost', '.local', '.internal', and literal IPs but does not resolve DNS",
+        "image_cache.rs:582-587 `cache_url_image` relies on this check for SSRF protection"
+      ],
+      "pre_existing": false,
+      "suggested_fix": "Resolve the hostname before the HTTP request and reject targets that resolve to private, link-local, loopback, or CGNAT ranges; cache the resolved IP for the request lifetime.",
+      "reviewers": [
+        "security"
+      ],
+      "#": 70
+    },
+    {
+      "title": "Relay URL validation allows arbitrary paths and query strings",
+      "severity": "P3",
+      "file": "src-tauri/src/lib.rs",
+      "line": 2789,
+      "why_it_matters": "validate_relay_url checks the scheme and host but preserves arbitrary paths and query parameters. A relay URL like wss://trusted.com/path?token=secret is accepted. This can be used to smuggle userinfo-like tokens in the path or to point to unexpected endpoints on a shared host.",
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "confidence": 75,
+      "evidence": [
+        "lib.rs:2789-2811 `validate_relay_url` validates scheme/host/userinfo but returns `trimmed.to_string()`",
+        "lib.rs:3207-3221 `add_custom_relay` uses the raw URL after validation"
+      ],
+      "pre_existing": false,
+      "suggested_fix": "Normalize relay URLs to origin only (scheme + host + port) or explicitly reject paths, query strings, and fragments for relay entries.",
+      "reviewers": [
+        "security"
+      ],
+      "#": 71
+    },
+    {
+      "title": "Dashboard poll vote ingestion does not verify group membership",
+      "severity": "P3",
+      "file": "src-tauri/src/rumor.rs",
+      "line": 632,
+      "why_it_matters": "process_dashboard_poll_rumor records votes using the sender's pubkey but does not verify that the sender is actually a member of the MLS group or the relevant squad. An attacker who can inject or relay a vote event can distort poll results.",
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "confidence": 75,
+      "evidence": [
+        "rumor.rs:632-642 `process_dashboard_poll_rumor` parses vote and calls `db_apply_vote` with `voter` from `rumor.pubkey.to_bech32()`",
+        "No call to verify the voter is in the parent_id/squad membership or the MLS group"
+      ],
+      "pre_existing": false,
+      "suggested_fix": "Before applying a vote, check that the voter pubkey is a member of the parent squad/MLS group (using the existing roster tables) and that the vote is not after the poll's deadline.",
+      "reviewers": [
+        "security"
+      ],
+      "#": 72
+    },
+    {
+      "title": "DmThread copies npub with raw navigator.clipboard and no fallback",
+      "severity": "P3",
+      "file": "src/components/dm/DmThread.svelte",
+      "line": 378,
+      "confidence": 75,
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "pre_existing": false,
+      "suggested_fix": "Use `copyTextToClipboard` from `src/lib/wallet/clipboard-copy.ts` and surface a toast when the copy fails.",
+      "reviewers": [
+        "frontend"
+      ],
+      "why_it_matters": null,
+      "evidence": null,
+      "#": 73
+    },
+    {
+      "title": "ProfileSection swallows clipboard errors when copying npub",
+      "severity": "P3",
+      "file": "src/components/settings/ProfileSection.svelte",
+      "line": 260,
+      "confidence": 75,
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "pre_existing": false,
+      "suggested_fix": "Use `copyTextToClipboard` and show a toast on failure so the user knows the npub was not copied.",
+      "reviewers": [
+        "frontend"
+      ],
+      "why_it_matters": null,
+      "evidence": null,
+      "#": 74
+    }
+  ],
+  "actionable_findings": [
+    {
+      "title": "Hardcoded Argon2 salt weakens key derivation",
+      "severity": "P0",
+      "file": "src-tauri/src/crypto.rs",
+      "line": 71,
+      "why_it_matters": "A fixed, public salt means identical passwords produce identical keys across every install. An attacker who extracts the encrypted database can pre-compute or share rainbow tables, turning password guessing into a fast offline attack instead of a per-user brute-force.",
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "confidence": 100,
+      "evidence": [
+        "crypto.rs:71-72 `let salt = \"vectovectvecvevpacto\".as_bytes();`",
+        "crypto.rs:64 `pub async fn hash_pass(password: String) -> [u8; 32]` derives the encryption key directly from this salt",
+        "TODO comment at crypto.rs:71 acknowledges the issue but leaves it hardcoded"
+      ],
+      "pre_existing": false,
+      "suggested_fix": "Generate a random 16+ byte salt on first install, store it in the OS keychain or a dedicated file outside the encrypted database, and pass it to argon2.hash_password_into.",
+      "reviewers": [
+        "security"
+      ],
+      "#": 1
+    },
+    {
+      "title": "Global ENCRYPTION_KEY is shared across accounts and pinned on first use",
+      "severity": "P0",
+      "file": "src-tauri/src/crypto.rs",
+      "line": 88,
+      "why_it_matters": "internal_encrypt uses the first key it ever sees (from a PIN or Argon2) for all subsequent encryption, and stores it in a global OnceCell. Switching accounts, rotating PINs, or creating a second account does not rotate the key, so all accounts' secrets are encrypted under the same key derived from the first PIN used in the process lifetime.",
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "confidence": 100,
+      "evidence": [
+        "crypto.rs:88-89 `let key = if password.is_none() { crate::ENCRYPTION_KEY.get().unwrap() } else { &hash_pass(password.unwrap()).await };`",
+        "crypto.rs:115-117 `if crate::ENCRYPTION_KEY.get().is_none() { crate::ENCRYPTION_KEY.set(*key).unwrap(); }`",
+        "lib.rs global `static ENCRYPTION_KEY: OnceCell<[u8; 32]> = OnceCell::new();`"
+      ],
+      "pre_existing": false,
+      "suggested_fix": "Scope the encryption key per account and derive it from the account-specific PIN each time; do not cache it globally. If caching is needed for performance, use a key cache keyed by active account and clear it on logout/switch.",
+      "reviewers": [
+        "security"
+      ],
+      "#": 2
+    },
+    {
+      "title": "MLS keypackage publishing is a no-op stub",
+      "severity": "P0",
+      "file": "src-tauri/src/mls.rs",
+      "line": 160,
+      "why_it_matters": "Other devices cannot add this device to MLS groups because keypackages are never generated, published, or indexed. Group creation that depends on this device will fail silently or create groups with missing members.",
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "confidence": 100,
+      "evidence": [
+        "mls.rs:160-166: publish_device_keypackage contains only TODO comments and returns Ok(()) after ignoring the device_id argument."
+      ],
+      "suggested_fix": "Implement real nostr-mls keypackage generation, publish the event to TRUSTED_RELAYS, and store the reference in the mls_keypackage_index table. Add tests that verify the published event is fetchable and indexed.",
+      "pre_existing": false,
+      "reviewers": [
+        "correctness"
+      ],
+      "#": 3
+    },
+    {
+      "title": "CI only builds releases; no test, lint, typecheck, or clippy gates",
+      "severity": "P1",
+      "file": ".github/workflows/main.yaml",
+      "line": 1,
+      "confidence": 100,
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "pre_existing": false,
+      "suggested_fix": "Add a `quality-gates` job before `publish-tauri` that runs `pnpm check`, `pnpm lint`, `pnpm test`, `cargo test`, and `cargo clippy -- -D warnings`; make the publish job `needs` it.",
+      "reviewers": [
+        "dev-velocity"
+      ],
+      "why_it_matters": null,
+      "evidence": null,
+      "#": 4
+    },
+    {
+      "title": "No CI runs on pull requests",
+      "severity": "P1",
+      "file": ".github/workflows/main.yaml",
+      "line": 3,
+      "confidence": 100,
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "pre_existing": false,
+      "suggested_fix": "Add `pull_request:` to the `on:` trigger, or create a separate `pr.yaml` workflow that runs the same quality gates.",
+      "reviewers": [
+        "dev-velocity"
+      ],
+      "why_it_matters": null,
+      "evidence": null,
+      "#": 5
+    },
+    {
+      "title": "SQLite database is not encrypted at rest",
+      "severity": "P1",
+      "file": "src-tauri/src/account_manager.rs",
+      "line": 478,
+      "why_it_matters": "The profile database is opened with plain rusqlite::Connection::open. While individual secret fields are encrypted, message metadata, contact graphs, profile fields, group membership, allowlists, and event tags are stored in plaintext. Anyone with filesystem access can read this sensitive data without knowing the PIN.",
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "confidence": 100,
+      "evidence": [
+        "account_manager.rs:478 `let conn = rusqlite::Connection::open(&db_path)`",
+        "Cargo.toml uses `rusqlite = { version = \"0.32\", features = [\"bundled\"] }` with no sqlcipher feature",
+        "account_manager.rs SQL_SCHEMA declares plaintext tables for profiles, chats, events, mls_groups, etc."
+      ],
+      "pre_existing": false,
+      "suggested_fix": "Enable SQLCipher (or libsql with encryption) for the bundled rusqlite build, or use a SQLCipher-backed connection, and derive the database key from the account PIN.",
+      "reviewers": [
+        "security"
+      ],
+      "#": 6
+    },
+    {
+      "title": "unsafe String::from_utf8_unchecked on decrypted ciphertext",
+      "severity": "P1",
+      "file": "src-tauri/src/crypto.rs",
+      "line": 159,
+      "why_it_matters": "internal_decrypt uses String::from_utf8_unchecked on plaintext produced by ChaCha20-Poly1305. Authenticated encryption only guarantees integrity, not that the original plaintext was valid UTF-8. A corrupted or maliciously modified ciphertext can trigger undefined behavior and panic paths.",
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "confidence": 100,
+      "evidence": [
+        "crypto.rs:155-160 `unsafe { Ok(String::from_utf8_unchecked(plaintext)) }` with a safety comment assuming valid UTF-8",
+        "The ciphertext path uses only `.len() >= 12` and `split_at(12)`; no version/tag-length checks"
+      ],
+      "pre_existing": false,
+      "suggested_fix": "Replace with fallible String::from_utf8 and return a DecodingError; treat non-UTF-8 plaintext as an integrity failure.",
+      "reviewers": [
+        "security"
+      ],
+      "#": 7
+    },
+    {
+      "title": "Export of recovery phrase and EVM keys requires no re-authentication",
+      "severity": "P1",
+      "file": "src-tauri/src/db.rs",
+      "line": 2164,
+      "why_it_matters": "get_seed and export_evm_account_key_plaintext only check that the cached global ENCRYPTION_KEY is in memory. If a session is already unlocked, any code that can invoke these commands can extract the recovery phrase or EVM private key without re-entering the PIN. This violates the expectation that exporting secrets is a high-risk action.",
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "confidence": 100,
+      "evidence": [
+        "db.rs:2164-2179 `get_seed` decrypts with `internal_decrypt(encrypted, None)` \u2014 no password parameter",
+        "evm_accounts.rs:582-590 `export_evm_account_key_plaintext` calls `resolve_private_key_hex_for_account_id` which also uses `internal_decrypt(..., None)`",
+        "src/lib/api/auth.ts exposes these as `exportRecoveryPhrase()` and `exportEvmAccountKeyPlaintext()`"
+      ],
+      "pre_existing": false,
+      "suggested_fix": "Add a mandatory `password: Option<String>` parameter to both export commands and require a fresh PIN/password before decrypting and returning secrets.",
+      "reviewers": [
+        "security"
+      ],
+      "#": 8
+    },
+    {
+      "title": "Pending message leaves stale row after ID update",
+      "severity": "P1",
+      "file": "src-tauri/src/db.rs",
+      "line": 3493,
+      "why_it_matters": "When a pending message is sent, its ID changes from a synthetic pending ID to the real event ID. save_event uses INSERT OR IGNORE, so the old pending=true row remains in the events table. After restart the UI loads both the pending and sent rows, showing duplicate messages.",
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "confidence": 100,
+      "evidence": [
+        "db.rs:3493-3520: save_event uses INSERT OR IGNORE, so existing rows are never overwritten.",
+        "message.rs:765-790: After a successful DM send the message ID is updated in state but the old pending DB row is never deleted.",
+        "mls.rs:1850-1900: After a successful MLS send the pending ID is updated to the real ID but no cleanup of the pending DB row occurs."
+      ],
+      "suggested_fix": "After confirming a send, DELETE the row whose id = pending_id, or use a single stable row ID from creation by updating the pending event in place instead of inserting a new row.",
+      "pre_existing": false,
+      "reviewers": [
+        "correctness"
+      ],
+      "#": 9
+    },
+    {
+      "title": "MLS welcome and keypackage share kind value 443",
+      "severity": "P1",
+      "file": "src-tauri/src/stored_event.rs",
+      "line": 45,
+      "why_it_matters": "Code that branches on event_kind::MLS_WELCOME versus event_kind::MLS_KEY_PACKAGE cannot distinguish the two event types because both constants evaluate to 443. This causes mis-routing and mis-storage of welcome vs keypackage events.",
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "confidence": 100,
+      "evidence": [
+        "stored_event.rs:45-48: MLS_WELCOME and MLS_KEY_PACKAGE are both declared as 443."
+      ],
+      "suggested_fix": "Assign distinct kind values (e.g., keep MLS_WELCOME as 443 and move MLS_KEY_PACKAGE to a separate value such as 444), then audit all match sites that reference these constants.",
+      "pre_existing": false,
+      "reviewers": [
+        "correctness"
+      ],
+      "#": 11
+    },
+    {
+      "title": "Hex decoder silently corrupts invalid input",
+      "severity": "P1",
+      "file": "src-tauri/src/util.rs",
+      "line": 300,
+      "why_it_matters": "hex_string_to_bytes maps non-hex characters to 0 and ignores trailing characters on odd-length strings. A malformed encryption key, group ID, or EVM address will be accepted as a different value, causing wrong decryption keys, wrong group membership, or wrong addresses.",
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "confidence": 100,
+      "evidence": [
+        "util.rs:300-340: non-hex bytes fall through to 0, and the loop advances by 2 so an odd trailing character is dropped."
+      ],
+      "suggested_fix": "Change the function signature to return Result<Vec<u8>, String>, reject non-hex characters, and require an even-length input. Update all callers to handle the error.",
+      "pre_existing": false,
+      "reviewers": [
+        "correctness"
+      ],
+      "#": 12
+    },
+    {
+      "title": "Profiles store not reset on logout / account switch",
+      "severity": "P1",
+      "file": "src/lib/utils/clear-account-state.ts",
+      "line": 135,
+      "confidence": 100,
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "pre_existing": false,
+      "suggested_fix": "Add `profiles.set({})` and `profileLoadingStates.set({})` to `clearAccountState` so the next account cannot see the previous account's cached Nostr profiles.",
+      "reviewers": [
+        "frontend"
+      ],
+      "why_it_matters": null,
+      "evidence": null,
+      "#": 13
+    },
+    {
+      "title": "No integration or end-to-end test harness for the Tauri command contract",
+      "severity": "P1",
+      "file": "docs/plans/2026-06-27-001-feat-self-correcting-ai-testing-plan.md",
+      "line": 1,
+      "confidence": 95,
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "pre_existing": false,
+      "suggested_fix": "Implement the planned two-phase harness (Playwright mock build + WebdriverIO real Tauri) or add a minimal Rust integration test suite using `tauri::test` and a small Tauri command smoke test.",
+      "reviewers": [
+        "dev-velocity"
+      ],
+      "why_it_matters": null,
+      "evidence": null,
+      "#": 14
+    },
+    {
+      "title": "Rust backend has only ~62 tests across 63 source files; high-risk modules lack coverage",
+      "severity": "P1",
+      "file": "src-tauri/Cargo.toml",
+      "line": 1,
+      "confidence": 90,
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "pre_existing": false,
+      "suggested_fix": "Prioritize unit tests for `mls.rs`, `message.rs`, `chat.rs`, `account_manager.rs`, `profile_sync.rs`, `evm/wallet_ops.rs`, `evm/advanced_contract_call.rs`, `voice.rs`, and `net.rs`; consider a test coverage badge in CI.",
+      "reviewers": [
+        "dev-velocity"
+      ],
+      "why_it_matters": null,
+      "evidence": null,
+      "#": 15
+    },
+    {
+      "title": "Auto-updater endpoint points to legacy `covenant-application` repository",
+      "severity": "P1",
+      "file": "src-tauri/tauri.conf.json",
+      "line": 50,
+      "confidence": 90,
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "pre_existing": false,
+      "suggested_fix": "Update the updater endpoint to `https://github.com/covenant-gov/pacto-app/releases/latest/download/latest.json` and validate the public key matches the signing secret used in CI.",
+      "reviewers": [
+        "dev-velocity"
+      ],
+      "why_it_matters": null,
+      "evidence": null,
+      "#": 16
+    },
+    {
+      "title": "Message deduplication is non-atomic across DB and state",
+      "severity": "P1",
+      "file": "src-tauri/src/lib.rs",
+      "line": 1550,
+      "why_it_matters": "Two concurrent giftwraps for the same message can both pass the message_exists_in_db check before either is saved, then both be added to in-memory state. The duplicate ID check inside Chat::internal_add_message only protects the local Vec, not the DB, and cannot protect cross-task races.",
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "confidence": 75,
+      "evidence": [
+        "lib.rs:1550-1580: handle_text_message checks message_exists_in_db outside the STATE lock, then adds to STATE and later saves.",
+        "mls.rs:1170-1200: sync_group_since_cursor checks message_exists_in_db, drops the lock, then adds to STATE and saves."
+      ],
+      "suggested_fix": "Acquire a per-message or per-chat async lock around the check-add-save sequence, or make insertion conditional on the DB INSERT result and reconcile failures by rolling back the in-memory add.",
+      "pre_existing": false,
+      "reviewers": [
+        "correctness"
+      ],
+      "#": 17
+    },
+    {
+      "title": "MLS add-member merges commit before publish succeeds",
+      "severity": "P1",
+      "file": "src-tauri/src/mls.rs",
+      "line": 580,
+      "why_it_matters": "add_member_device calls engine.merge_pending_commit after client.send_event returns. If the evolution event fails to publish (e.g., all relays reject it), the local group advances to the next epoch while other members remain in the previous epoch, permanently breaking group state consistency.",
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "confidence": 75,
+      "evidence": [
+        "mls.rs:580-600: merge_pending_commit is invoked after client.send_event, and the send result is only logged with eprintln on failure."
+      ],
+      "suggested_fix": "Confirm the evolution event was accepted by at least one relay before merging; on failure, leave the pending commit unmerged and return an error so the caller can retry.",
+      "pre_existing": false,
+      "reviewers": [
+        "correctness"
+      ],
+      "#": 18
+    },
+    {
+      "title": "MLS send marks success without relay confirmation",
+      "severity": "P1",
+      "file": "src-tauri/src/mls.rs",
+      "line": 1850,
+      "why_it_matters": "client.send_event_to returns an Output that contains success and failed relay lists. The code only matches Ok/Err, so an Ok result with an empty success list (all relays rejected the message) is treated as a successful send. The UI shows sent but the message never reached the network.",
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "confidence": 75,
+      "evidence": [
+        "mls.rs:1850-1900: send_result is matched as Ok(_) without inspecting Output.success."
+      ],
+      "suggested_fix": "Inspect the Output's success list; if it is empty, treat the send as a failure, mark the message failed, and retry or surface the error to the user.",
+      "pre_existing": false,
+      "reviewers": [
+        "correctness"
+      ],
+      "#": 19
+    },
+    {
+      "title": "Release body is a placeholder and every release is published as a draft",
+      "severity": "P2",
+      "file": ".github/workflows/main.yaml",
+      "line": 107,
+      "confidence": 100,
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "pre_existing": false,
+      "suggested_fix": "Generate release notes from a `CHANGELOG.md` or from conventional commits; set `releaseDraft: false` once a review process is documented, or keep draft and require a human review step.",
+      "reviewers": [
+        "dev-velocity"
+      ],
+      "why_it_matters": null,
+      "evidence": null,
+      "#": 20
+    },
+    {
+      "title": "Panic paths on attacker-controlled or runtime data in crypto and messaging",
+      "severity": "P2",
+      "file": "src-tauri/src/crypto.rs",
+      "line": 38,
+      "why_it_matters": "Multiple unwrap/expect calls in crypto.rs and message.rs can panic on malformed input. For example, crypto::encrypt_data unwraps hex decoding, and message.rs uses expect/unwrap for the Nostr client, signer, public key, and state lookup. A crafted message or corrupted database entry can crash the backend, causing denial of service or leaving corrupted state.",
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "confidence": 100,
+      "evidence": [
+        "crypto.rs:38-39 `hex::decode(...).unwrap()` in encrypt_data",
+        "crypto.rs:69 `Params::new(...).unwrap()`",
+        "crypto.rs:79 `argon.hash_password_into(...).unwrap()`",
+        "crypto.rs:89 `crate::ENCRYPTION_KEY.get().unwrap()`",
+        "crypto.rs:100 `ChaCha20Poly1305::new_from_slice(key).expect(...)`",
+        "message.rs:309-311 `get_nostr_client().expect(...)`, `client.signer().await.unwrap()`, `signer.get_public_key().await.unwrap()`",
+        "message.rs:419 `let attached_file = file.unwrap();`",
+        "message.rs:512 `crypto::encrypt_data(...).unwrap()`"
+      ],
+      "pre_existing": false,
+      "suggested_fix": "Convert unwrap/expect in command and protocol paths to Result propagation; reserve expect for programmer-invariant checks that are truly unreachable.",
+      "reviewers": [
+        "security"
+      ],
+      "#": 21
+    },
+    {
+      "title": "Login/create account commands return plaintext secrets to frontend",
+      "severity": "P2",
+      "file": "src-tauri/src/lib.rs",
+      "line": 3961,
+      "why_it_matters": "create_account and login return a LoginKeyPair containing the nsec (private) and the EVM private key. The frontend then encrypts them with the PIN, but during the round-trip the secrets are exposed in the webview/IPC layer. If the frontend is compromised or IPC is traced, the keys leak before they are encrypted.",
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "confidence": 100,
+      "evidence": [
+        "lib.rs:4214-4237 `encrypt` command returns plaintext and also saves seed via `db::set_seed`",
+        "lib.rs:4437-4458 `create_account` returns `LoginKeyPair { private: ..., evm_private_key: ... }`",
+        "lib.rs:4105-4138 `login` returns `LoginKeyPair { private: ..., evm_private_key: ... }`",
+        "src/lib/api/auth.ts defines `LoginKeyPair` with optional `evm_private_key`"
+      ],
+      "pre_existing": false,
+      "suggested_fix": "Encrypt secrets inside the Rust backend using the PIN passed directly to the backend, and return only the public npub/address to the frontend. Avoid sending private keys over IPC.",
+      "reviewers": [
+        "security"
+      ],
+      "#": 22
+    },
+    {
+      "title": "Runtime panic in message attachment save path",
+      "severity": "P2",
+      "file": "src-tauri/src/message.rs",
+      "line": 540,
+      "why_it_matters": "The attachment send path uses unwrap on path resolution, directory creation, and file writes. If the filesystem is unavailable or permissions are wrong, the entire Tauri command panics instead of returning a controlled error to the frontend.",
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "confidence": 100,
+      "evidence": [
+        "message.rs:540-550: handle.path().resolve(...).unwrap(), create_dir_all(...).unwrap(), write(...).unwrap()."
+      ],
+      "suggested_fix": "Replace unwrap with ? propagation and map errors to String so the command returns a usable error and the frontend can show a failure state.",
+      "pre_existing": false,
+      "reviewers": [
+        "correctness"
+      ],
+      "#": 23
+    },
+    {
+      "title": "MLS sync processed counter double-increments",
+      "severity": "P2",
+      "file": "src-tauri/src/mls.rs",
+      "line": 1050,
+      "why_it_matters": "In sync_group_since_cursor, processed is incremented inside the Commit/Proposal arms and again at the end of the Ok arm. The returned processed count is inflated and misleads sync progress and metrics.",
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "confidence": 100,
+      "evidence": [
+        "mls.rs:1050-1100: processed += 1 appears inside the Commit and Proposal branches and again after the match expression."
+      ],
+      "suggested_fix": "Remove the trailing processed += 1 so each event is counted exactly once.",
+      "pre_existing": false,
+      "reviewers": [
+        "correctness"
+      ],
+      "#": 24
+    },
+    {
+      "title": "Attachment download lacks SSRF protection",
+      "severity": "P2",
+      "file": "src-tauri/src/net.rs",
+      "line": 80,
+      "why_it_matters": "download_with_reporter in net.rs is used to fetch attachment payloads from URLs supplied by other users. Unlike image_cache.rs, it does not validate schemes, block private hosts, or block DNS-rebinding targets. A malicious attachment URL can probe internal services (e.g., http://localhost:8545, http://169.254.169.254) or enumerate the local network.",
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "confidence": 100,
+      "evidence": [
+        "net.rs:80-142 `download_with_reporter` accepts any `content_url` and performs HEAD/GET/RANGE requests",
+        "net.rs:149-178 `supports_range` does not validate URL safety",
+        "rumor.rs:341-347 `process_file_attachment` stores `content_url` and later passes it to `net::download`",
+        "image_cache.rs:527-531 has a private-host check but net.rs does not reuse it"
+      ],
+      "pre_existing": false,
+      "suggested_fix": "Re-use the image_cache SSRF checks (HTTPS-only, private-host block, no userinfo) for all attachment downloads; additionally resolve hostnames and block addresses that resolve to private/link-local IPs.",
+      "reviewers": [
+        "security"
+      ],
+      "#": 25
+    },
+    {
+      "title": "Profile sync queue caches failures as successes",
+      "severity": "P2",
+      "file": "src-tauri/src/profile_sync.rs",
+      "line": 230,
+      "why_it_matters": "profile::load_profile is called and its return value is ignored. mark_done is always called after the await, which records last_fetched as now. A network failure or relay timeout therefore causes the profile to be skipped for the entire cache window, leaving stale or missing metadata.",
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "confidence": 100,
+      "evidence": [
+        "profile_sync.rs:230-240: load_profile(entry.npub.clone()).await; result is discarded, then mark_done unconditionally."
+      ],
+      "suggested_fix": "Only call mark_done when load_profile returns true; on failure, either leave the entry in the queue or requeue it with a short backoff and increment a retry counter.",
+      "pre_existing": false,
+      "reviewers": [
+        "correctness"
+      ],
+      "#": 26
+    },
+    {
+      "title": "MESSAGE_EDIT is not a known kind in StoredEvent",
+      "severity": "P2",
+      "file": "src-tauri/src/stored_event.rs",
+      "line": 120,
+      "why_it_matters": "is_known_kind() matches only DM, file, reaction, and application-specific kinds. Edit events are fully supported but classified as unknown, which can cause them to be rendered as placeholder events or handled inconsistently.",
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "confidence": 100,
+      "evidence": [
+        "stored_event.rs:120-130: is_known_kind matches event_kind::PRIVATE_DIRECT_MESSAGE, FILE_ATTACHMENT, REACTION, APPLICATION_SPECIFIC but not MESSAGE_EDIT."
+      ],
+      "suggested_fix": "Add event_kind::MESSAGE_EDIT to the is_known_kind match and verify that edit events are no longer treated as unknown.",
+      "pre_existing": false,
+      "reviewers": [
+        "correctness"
+      ],
+      "#": 27
+    },
+    {
+      "title": "post-login sync fires uncoordinated fire-and-forget tasks",
+      "severity": "P2",
+      "file": "src/lib/app/post-login-sync.ts",
+      "line": 11,
+      "confidence": 100,
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "pre_existing": false,
+      "suggested_fix": "Coordinate connect/fetch/profile-sync/MLS-sync in a single async sequence with a loading flag and user-facing error on critical failure.",
+      "reviewers": [
+        "frontend"
+      ],
+      "why_it_matters": null,
+      "evidence": null,
+      "#": 28
+    },
+    {
+      "title": "Tauri event payloads cast with `as` instead of validated",
+      "severity": "P2",
+      "file": "src/lib/app/tauri-subscriptions.ts",
+      "line": 75,
+      "confidence": 100,
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "pre_existing": false,
+      "suggested_fix": "Add runtime validation (e.g. zod) for each event payload and use a shared typed event contract with Rust.",
+      "reviewers": [
+        "frontend"
+      ],
+      "why_it_matters": null,
+      "evidence": null,
+      "#": 29
+    },
+    {
+      "title": "Svelte 5 project still uses legacy reactive statements with side effects",
+      "severity": "P2",
+      "file": "src/routes/+page.svelte",
+      "line": 515,
+      "confidence": 100,
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "pre_existing": false,
+      "suggested_fix": "Migrate side-effect reactive blocks (`$: if ...`) to `$effect` runes and pure derived stores; keep components in legacy mode only where necessary.",
+      "reviewers": [
+        "frontend"
+      ],
+      "why_it_matters": null,
+      "evidence": null,
+      "#": 30
+    },
+    {
+      "title": "loadOlder advances offset by page size even when fewer messages are returned",
+      "severity": "P2",
+      "file": "src/routes/+page.svelte",
+      "line": 713,
+      "confidence": 100,
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "pre_existing": false,
+      "suggested_fix": "Advance the offset by `older.length` instead of `LOAD_OLDER_PAGE_SIZE` so no messages are skipped at the tail of the history.",
+      "reviewers": [
+        "frontend"
+      ],
+      "why_it_matters": null,
+      "evidence": null,
+      "#": 31
+    },
+    {
+      "title": "Auth errors surfaced as raw error.message strings",
+      "severity": "P2",
+      "file": "src/stores/auth.ts",
+      "line": 96,
+      "confidence": 100,
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "pre_existing": false,
+      "suggested_fix": "Use `getInvokeErrorMessage(e, 'Failed to check auth status')` in all auth catch blocks instead of `error.message`.",
+      "reviewers": [
+        "frontend"
+      ],
+      "why_it_matters": null,
+      "evidence": null,
+      "#": 32
+    },
+    {
+      "title": "reconcilePeerThreadInvites mutates another store inside `update`",
+      "severity": "P2",
+      "file": "src/stores/dm.ts",
+      "line": 260,
+      "confidence": 100,
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "pre_existing": false,
+      "suggested_fix": "Compute the new inbox snapshot from the closure, then call `pactoAppInboxMessages.set(...)` after `backendDmMessages.update(...)` returns.",
+      "reviewers": [
+        "frontend"
+      ],
+      "why_it_matters": null,
+      "evidence": null,
+      "#": 33
+    },
+    {
+      "title": "loadProfile uses a fixed 500ms sleep for background fetch",
+      "severity": "P2",
+      "file": "src/stores/profiles.ts",
+      "line": 218,
+      "confidence": 100,
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "pre_existing": false,
+      "suggested_fix": "Replace the sleep with a promise-based waiter keyed by npub (e.g. backend resolves when the profile is ready, or a timeout with exponential backoff).",
+      "reviewers": [
+        "frontend"
+      ],
+      "why_it_matters": null,
+      "evidence": null,
+      "#": 34
+    },
+    {
+      "title": "safe.ts asserts unsafe address string as viem Address",
+      "severity": "P2",
+      "file": "src/stores/safe.ts",
+      "line": 80,
+      "confidence": 100,
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "pre_existing": false,
+      "suggested_fix": "Validate `entry.safeAddress` with `isAddress` before passing it to `getSafeState`; return early or record an error if invalid.",
+      "reviewers": [
+        "frontend"
+      ],
+      "why_it_matters": null,
+      "evidence": null,
+      "#": 35
+    },
+    {
+      "title": "ESLint config uses only recommended presets and there is no formatting script or Prettier config",
+      "severity": "P2",
+      "file": "eslint.config.js",
+      "line": 1,
+      "confidence": 95,
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "pre_existing": false,
+      "suggested_fix": "Add Prettier and a `format`/`format:check` script; extend `typescript-eslint` type-aware recommended rules and add `eslint-plugin-import` for import/order consistency.",
+      "reviewers": [
+        "dev-velocity"
+      ],
+      "why_it_matters": null,
+      "evidence": null,
+      "#": 36
+    },
+    {
+      "title": "`tauri-plugin-mcp-bridge` is a non-optional dependency in Cargo.toml despite being described as debug-only",
+      "severity": "P2",
+      "file": "src-tauri/Cargo.toml",
+      "line": 100,
+      "confidence": 95,
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "pre_existing": false,
+      "suggested_fix": "Move `tauri-plugin-mcp-bridge` to `[target.'cfg(debug_assertions)'.dependencies]` or make it an optional feature and only enable it in debug builds; verify release binaries do not link the plugin.",
+      "reviewers": [
+        "dev-velocity"
+      ],
+      "why_it_matters": null,
+      "evidence": null,
+      "#": 37
+    },
+    {
+      "title": "`ALCHEMY_` env prefix exposes the backend RPC secret to the webview bundle",
+      "severity": "P2",
+      "file": "vite.config.ts",
+      "line": 14,
+      "confidence": 95,
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "pre_existing": false,
+      "suggested_fix": "Remove `ALCHEMY_` from `envPrefix` in `vite.config.ts`; the Rust backend already reads `ALCHEMY_RPC_KEY` from the process environment.",
+      "reviewers": [
+        "dev-velocity"
+      ],
+      "why_it_matters": null,
+      "evidence": null,
+      "#": 38
+    },
+    {
+      "title": "Frontend coverage thresholds are set but not enforced by CI; Svelte components are excluded from coverage",
+      "severity": "P2",
+      "file": "vite.config.ts",
+      "line": 42,
+      "confidence": 95,
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "pre_existing": false,
+      "suggested_fix": "Add a CI step that runs `pnpm test:coverage` and gates on the 80% thresholds; add component-level tests or remove the `src/**/*.svelte` exclusion so coverage reflects real UI code.",
+      "reviewers": [
+        "dev-velocity"
+      ],
+      "why_it_matters": null,
+      "evidence": null,
+      "#": 39
+    },
+    {
+      "title": "No tracked changelog or release notes file",
+      "severity": "P2",
+      "file": "docs/README.md",
+      "line": 1,
+      "confidence": 90,
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "pre_existing": false,
+      "suggested_fix": "Add a `CHANGELOG.md` at the repo root and update the CI workflow to populate `releaseBody` from it.",
+      "reviewers": [
+        "dev-velocity"
+      ],
+      "why_it_matters": null,
+      "evidence": null,
+      "#": 40
+    },
+    {
+      "title": "Alpha-only legacy-fix docs and repair code still live in the codebase",
+      "severity": "P2",
+      "file": "docs/legacy-fixes/CATALOG.md",
+      "line": 1,
+      "confidence": 90,
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "pre_existing": false,
+      "suggested_fix": "Remove the `docs/legacy-fixes/` directory and the LF-001/LF-002/LF-003 repair branches in `db.rs`, `wallet_ops.rs`, and `watched-tokens.ts`; move any retained historical context into the relevant design docs.",
+      "reviewers": [
+        "dev-velocity"
+      ],
+      "why_it_matters": null,
+      "evidence": null,
+      "#": 41
+    },
+    {
+      "title": "Deep-link handler still references legacy `vector://` and `vectorapp.io` schemes",
+      "severity": "P2",
+      "file": "src-tauri/src/lib.rs",
+      "line": 6174,
+      "confidence": 90,
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "pre_existing": false,
+      "suggested_fix": "Update the single-instance deep-link filter to `pacto://` or the current product domain; update the `TRUSTED_RELAYS` entries that still point to `asia.vectorapp.io` if they are meant to be Pacto relays.",
+      "reviewers": [
+        "dev-velocity"
+      ],
+      "why_it_matters": null,
+      "evidence": null,
+      "#": 42
+    },
+    {
+      "title": "`.cursor/rules` is missing critical policies for lock discipline, tests, env vars, and global state",
+      "severity": "P2",
+      "file": ".cursor/rules/brief-inline-commentary.mdc",
+      "line": 1,
+      "confidence": 85,
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "requires_verification": false,
+      "pre_existing": false,
+      "suggested_fix": "Add `.cursor/rules` files: keep `pnpm-lock.yaml` and `Cargo.lock` in sync; add tests for every new Tauri command; new Vite env vars must be `VITE_` or `ALCHEMY_`; avoid new `lazy_static`/`OnceCell` globals.",
+      "reviewers": [
+        "dev-velocity"
+      ],
+      "why_it_matters": null,
+      "evidence": null,
+      "#": 43
+    },
+    {
+      "title": "No dedicated AI onboarding doc for adding Tauri commands, stores, or EVM/MLS features",
+      "severity": "P2",
+      "file": "docs/README.md",
+      "line": 1,
+      "confidence": 85,
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "requires_verification": false,
+      "pre_existing": false,
+      "suggested_fix": "Create `docs/AI_ONBOARDING.md` with step-by-step checklists for adding a Tauri command, adding a store, adding an EVM contract binding, and adding an MLS feature, plus how to test each.",
+      "reviewers": [
+        "dev-velocity"
+      ],
+      "why_it_matters": null,
+      "evidence": null,
+      "#": 44
+    },
+    {
+      "title": "Account switch races between account and ID caches",
+      "severity": "P2",
+      "file": "src-tauri/src/account_manager.rs",
+      "line": 1260,
+      "why_it_matters": "switch_account calls set_current_account before clearing and reloading the chat/user ID caches. Any concurrent DB operation that uses the current account and the cache could read stale cache entries against the newly selected account's database.",
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "confidence": 75,
+      "evidence": [
+        "account_manager.rs:1260-1280: set_current_account is invoked, then db::clear_id_caches and preload run."
+      ],
+      "suggested_fix": "Clear the caches before changing the current account, or hold a single account-switch mutex so no DB operation can run between the account change and cache reload.",
+      "pre_existing": false,
+      "reviewers": [
+        "correctness"
+      ],
+      "#": 45
+    },
+    {
+      "title": "SQLite connection not returned on query error",
+      "severity": "P2",
+      "file": "src-tauri/src/db.rs",
+      "line": 3128,
+      "why_it_matters": "Functions such as get_dm_sent_received return Err before returning the connection to the pool. Because the pool holds only one connection per account, repeated errors exhaust the pool and block all subsequent DB operations.",
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "confidence": 75,
+      "evidence": [
+        "db.rs:3128-3142: get_dm_sent_received returns the query error before return_db_connection is called."
+      ],
+      "suggested_fix": "Introduce a RAII guard that returns the connection on Drop, or use a closure pattern that always returns the connection before propagating the result.",
+      "pre_existing": false,
+      "reviewers": [
+        "correctness"
+      ],
+      "#": 46
+    },
+    {
+      "title": "Edit timestamps lack millisecond precision",
+      "severity": "P2",
+      "file": "src-tauri/src/db.rs",
+      "line": 4070,
+      "why_it_matters": "get_message_views builds edit history using event.created_at * 1000, ignoring the ms tag. Multiple edits in the same second cannot be ordered correctly and may display out of order.",
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "confidence": 75,
+      "evidence": [
+        "db.rs:4070-4080: timestamp_ms = event.created_at * 1000 for edits, while messages use event.timestamp_ms()."
+      ],
+      "suggested_fix": "Use event.timestamp_ms() for edit timestamps, consistent with how message timestamps are reconstructed.",
+      "pre_existing": false,
+      "reviewers": [
+        "correctness"
+      ],
+      "#": 47
+    },
+    {
+      "title": "EVM transactions lack explicit chain_id",
+      "severity": "P2",
+      "file": "src-tauri/src/evm/wallet_ops.rs",
+      "line": 370,
+      "why_it_matters": "wallet_build_and_send_transaction constructs a TransactionRequest without .with_chain_id. If the RPC provider is misconfigured or the signer is on a different network, the transaction can be signed for the wrong chain and rejected or, worse, replayed on an unintended network.",
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "confidence": 75,
+      "evidence": [
+        "wallet_ops.rs:340-380: TransactionRequest is built with to/value/input but never chain_id."
+      ],
+      "suggested_fix": "Call .with_chain_id(net.chain_id) on the TransactionRequest before sending, and verify the returned receipt's chain_id matches.",
+      "pre_existing": false,
+      "reviewers": [
+        "correctness"
+      ],
+      "#": 48
+    },
+    {
+      "title": "Auto-accept of squad channel invites based on DM content only",
+      "severity": "P2",
+      "file": "src-tauri/src/lib.rs",
+      "line": 1566,
+      "why_it_matters": "handle_text_message parses any incoming DM as a channel_in_squad invitation and auto-accepts the MLS welcome if the announcements_group_id matches a known local squad. The sender is not verified to be an admin or authorized inviter of that squad. A user who has the user's npub can send a crafted DM and force the user into a channel without consent.",
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "confidence": 75,
+      "evidence": [
+        "lib.rs:1566-1605 `handle_text_message` auto-accepts when `parse_channel_in_squad_dm` succeeds and `in_squad` is true",
+        "lib.rs:5630-5648 `parse_channel_in_squad_dm` only validates JSON shape and type string",
+        "No check that `sender` or `contact` is an admin/member authorized to add channels to the squad"
+      ],
+      "pre_existing": false,
+      "suggested_fix": "Before auto-accepting, verify the DM sender is a member of the announcements group (or otherwise authorized) and that the channel_group_id is a valid welcome from the welcomer known to the squad.",
+      "reviewers": [
+        "security"
+      ],
+      "#": 49
+    },
+    {
+      "title": "Giftwrap unwrap failures are silently dropped",
+      "severity": "P2",
+      "file": "src-tauri/src/lib.rs",
+      "line": 1600,
+      "why_it_matters": "handle_event matches client.unwrap_gift_wrap with Err(_) => false. A legitimate message that fails to decrypt is discarded without any log, making it impossible to debug relay or key issues.",
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "confidence": 75,
+      "evidence": [
+        "lib.rs:1600-1605: the Err arm of unwrap_gift_wrap returns false and does not log."
+      ],
+      "suggested_fix": "Log the error reason (without message content or keys) and consider recording a metric for failed unwraps so QA can detect patterns.",
+      "pre_existing": false,
+      "reviewers": [
+        "correctness"
+      ],
+      "#": 50
+    },
+    {
+      "title": "MLS live messages do not advance sync cursor",
+      "severity": "P2",
+      "file": "src-tauri/src/lib.rs",
+      "line": 1904,
+      "why_it_matters": "The live MLS group-message handler processes new messages but never writes to mls_event_cursors. The next explicit sync therefore re-fetches from the old cursor, reprocessing messages that were already handled and creating unnecessary state churn.",
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "confidence": 75,
+      "evidence": [
+        "lib.rs:1904-2200: the notifs handler processes MLS ApplicationMessage results but never calls save_mls_event_cursor or equivalent."
+      ],
+      "suggested_fix": "After successfully processing an MLS message, update mls_event_cursors with the latest wrapper event id and timestamp so subsequent syncs can resume from the correct position.",
+      "pre_existing": false,
+      "reviewers": [
+        "correctness"
+      ],
+      "#": 51
+    },
+    {
+      "title": "Pending message ID can collide on rapid sends",
+      "severity": "P2",
+      "file": "src-tauri/src/message.rs",
+      "line": 300,
+      "why_it_matters": "The pending_id is derived from SystemTime::now().as_nanos(). If two messages are created in the same nanosecond, they receive the same ID, and subsequent state updates will target whichever message was found first.",
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "confidence": 75,
+      "evidence": [
+        "message.rs:300-310: pending_id = String::from(\"pending-\") + current_time.as_nanos().to_string()."
+      ],
+      "suggested_fix": "Include a monotonic counter or UUID in the pending ID so that two rapid sends cannot collide.",
+      "pre_existing": false,
+      "reviewers": [
+        "correctness"
+      ],
+      "#": 52
+    },
+    {
+      "title": "Attachment plaintext written before dedup/reuse decision",
+      "severity": "P2",
+      "file": "src-tauri/src/message.rs",
+      "line": 530,
+      "why_it_matters": "The plaintext file is written to disk and the directory created before the code decides whether an existing attachment URL will be reused. This writes unencrypted data unnecessarily, wastes disk space, and may leak plaintext files even when no upload occurs.",
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "confidence": 75,
+      "evidence": [
+        "message.rs:530-550: std::fs::create_dir_all and std::fs::write are called before will_reuse_existing is evaluated."
+      ],
+      "suggested_fix": "Move the file write to after the reuse decision and only write the plaintext when a new upload is actually required.",
+      "pre_existing": false,
+      "reviewers": [
+        "correctness"
+      ],
+      "#": 53
+    },
+    {
+      "title": "MLS group creation can omit members silently",
+      "severity": "P2",
+      "file": "src-tauri/src/mls.rs",
+      "line": 350,
+      "why_it_matters": "create_group loops over requested members and skips any whose keypackage cannot be resolved, then proceeds to create the group. The UI preflight is supposed to prevent this, but the backend still allows partial creation, which can surprise users and leave members without access.",
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "confidence": 75,
+      "evidence": [
+        "mls.rs:350-360: missing keypackage logs a warning and continues; group creation proceeds with invited_count = member_kp_events.len()."
+      ],
+      "suggested_fix": "Return an error if any requested member cannot be resolved, making group creation atomic, or at least require explicit confirmation from the caller for partial creation.",
+      "pre_existing": false,
+      "reviewers": [
+        "correctness"
+      ],
+      "#": 54
+    },
+    {
+      "title": "Local MLS group metadata deleted before leave commit is published",
+      "severity": "P2",
+      "file": "src-tauri/src/mls.rs",
+      "line": 640,
+      "why_it_matters": "leave_group calls client.send_event and then immediately removes the group from mls_groups. If the event fails to publish, the local group is gone but the network still treats the user as a member, so the user will still receive group messages and cannot rejoin cleanly.",
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "confidence": 75,
+      "evidence": [
+        "mls.rs:640-660: groups.retain removes the group immediately after send_event, without confirming acceptance."
+      ],
+      "suggested_fix": "Confirm the leave proposal was accepted by at least one relay before removing local metadata; on failure, return an error and keep the group.",
+      "pre_existing": false,
+      "reviewers": [
+        "correctness"
+      ],
+      "#": 55
+    },
+    {
+      "title": "MLS operations re-enter Tokio runtime from blocking pool",
+      "severity": "P2",
+      "file": "src-tauri/src/mls.rs",
+      "line": 1750,
+      "why_it_matters": "send_mls_message and the live MLS handler use tokio::task::spawn_blocking and then immediately call rt.block_on. This defeats the blocking pool, risks deadlocks, and can panic when block_on is called from within the async runtime's own threads.",
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "confidence": 75,
+      "evidence": [
+        "mls.rs:1750-1760: send_mls_message spawns a blocking task and then block_on's the async work.",
+        "lib.rs:1904-2200: notifs handler does the same for live MLS messages."
+      ],
+      "suggested_fix": "Refactor MlsService so that engine calls happen in a dedicated thread that communicates via channels, or make the engine itself Send-friendly so it can be used directly in async commands without spawn_blocking/block_on.",
+      "pre_existing": false,
+      "reviewers": [
+        "correctness"
+      ],
+      "#": 56
+    },
+    {
+      "title": "Attachment filename extension from attacker-controlled tag enables path traversal",
+      "severity": "P2",
+      "file": "src-tauri/src/rumor.rs",
+      "line": 341,
+      "why_it_matters": "process_file_attachment builds the local save path from the file-type tag by calling extension_from_mime. extension_from_mime's fallback returns the raw MIME subtype, which can contain path separators (e.g., \"application/../../evil\"). An attacker can craft a file attachment event that writes downloaded files outside the intended vector directory.",
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "confidence": 75,
+      "evidence": [
+        "rumor.rs:341-347 `let extension = crate::util::extension_from_mime(mime_type);` then `dir.join(format!(\"{}.{}, ...`",
+        "util.rs:821-836 `extension_from_mime` falls back to `lower.split('/').nth(1).unwrap_or(\"bin\")` without sanitization",
+        "rumor.rs:363-370 `let hash_file_path = dir.join(format!(\"{}.{}, ox_hash, extension));`"
+      ],
+      "pre_existing": false,
+      "suggested_fix": "Sanitize the extension to only allow alphanumeric and a small allow-list of safe characters (e.g., [a-zA-Z0-9]), and validate the final path is still inside the resolved base directory before writing.",
+      "reviewers": [
+        "security"
+      ],
+      "#": 57
+    },
+    {
+      "title": "Reactions may reference wrong message with multiple e-tags",
+      "severity": "P2",
+      "file": "src-tauri/src/rumor.rs",
+      "line": 430,
+      "why_it_matters": "process_reaction calls rumor.tags.find(TagKind::e()) which returns the first e-tag. If the reaction event references a root event plus a reply event, the reaction may be attached to the root instead of the intended message.",
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "confidence": 75,
+      "evidence": [
+        "rumor.rs:430-440: reference_tag is the first e-tag, regardless of reply marker."
+      ],
+      "suggested_fix": "Select the e-tag with the 'reply' marker, or fall back to the last e-tag if no marker is present, matching NIP-25 conventions.",
+      "pre_existing": false,
+      "reviewers": [
+        "correctness"
+      ],
+      "#": 58
+    },
+    {
+      "title": "ChatView membership-version reactive reloads members repeatedly",
+      "severity": "P2",
+      "file": "src/components/channel/ChatView.svelte",
+      "line": 205,
+      "confidence": 75,
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "pre_existing": false,
+      "suggested_fix": "Track the last loaded version per groupId and only call `loadChannelMembers()` when `$membershipVersionByGroupId[gid]` changes.",
+      "reviewers": [
+        "frontend"
+      ],
+      "why_it_matters": null,
+      "evidence": null,
+      "#": 59
+    },
+    {
+      "title": "ChatView sends all non-inbox messages with virtualBucket 'announcements'",
+      "severity": "P2",
+      "file": "src/components/channel/ChatView.svelte",
+      "line": 284,
+      "confidence": 75,
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "pre_existing": false,
+      "suggested_fix": "Derive the `virtualBucket` from `activeChannel.name` (announcements/inbox/polls) instead of hardcoding announcements.",
+      "reviewers": [
+        "frontend"
+      ],
+      "why_it_matters": null,
+      "evidence": null,
+      "#": 60
+    },
+    {
+      "title": "DmThread side-effect reactive block processes wallet grants on every message update",
+      "severity": "P2",
+      "file": "src/components/dm/DmThread.svelte",
+      "line": 110,
+      "confidence": 75,
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "pre_existing": false,
+      "suggested_fix": "Move the wallet-grant processing into an action triggered by new messages only, and clean up pending `setDmPeerEvmAddress` promises on component unmount.",
+      "reviewers": [
+        "frontend"
+      ],
+      "why_it_matters": null,
+      "evidence": null,
+      "#": 61
+    },
+    {
+      "title": "ExportAllSecretsModal keeps decrypted secrets in component memory",
+      "severity": "P2",
+      "file": "src/components/settings/ExportAllSecretsModal.svelte",
+      "line": 44,
+      "confidence": 75,
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "pre_existing": false,
+      "suggested_fix": "Clear the `bundle` object and `revealed` set immediately when the modal closes or on unmount; consider never storing the full bundle in a single object.",
+      "reviewers": [
+        "frontend"
+      ],
+      "why_it_matters": null,
+      "evidence": null,
+      "#": 62
+    },
+    {
+      "title": "DM load in +page.svelte is uncancellable and races on rapid conversation switches",
+      "severity": "P2",
+      "file": "src/routes/+page.svelte",
+      "line": 620,
+      "confidence": 75,
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "pre_existing": false,
+      "suggested_fix": "Track a per-npub request token or AbortController and ignore responses for conversations that are no longer active.",
+      "reviewers": [
+        "frontend"
+      ],
+      "why_it_matters": null,
+      "evidence": null,
+      "#": 63
+    },
+    {
+      "title": "Module-level Tauri listeners in profiles.ts can stack across HMR",
+      "severity": "P2",
+      "file": "src/stores/profiles.ts",
+      "line": 87,
+      "confidence": 75,
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "pre_existing": false,
+      "suggested_fix": "Register all listeners in a single async setup function with a shared `Map<string, UnlistenFn>` and call previous unlisteners before re-registering.",
+      "reviewers": [
+        "frontend"
+      ],
+      "why_it_matters": null,
+      "evidence": null,
+      "#": 64
+    },
+    {
+      "title": "AGENTS.md references a non-existent `install.sh` at the repo root",
+      "severity": "P3",
+      "file": "AGENTS.md",
+      "line": 205,
+      "confidence": 100,
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": false,
+      "pre_existing": false,
+      "suggested_fix": "Remove the stale `install.sh` reference from AGENTS.md, or add the intended `install.sh` script if it is still needed.",
+      "reviewers": [
+        "dev-velocity"
+      ],
+      "why_it_matters": null,
+      "evidence": null,
+      "#": 65
+    },
+    {
+      "title": "MessengerChatView optimistic message IDs can collide",
+      "severity": "P3",
+      "file": "src/components/dm/MessengerChatView.svelte",
+      "line": 57,
+      "confidence": 100,
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "pre_existing": false,
+      "suggested_fix": "Include a random component in the optimistic ID, e.g. `opt-${Date.now()}-${Math.random().toString(36).slice(2)}`.",
+      "reviewers": [
+        "frontend"
+      ],
+      "why_it_matters": null,
+      "evidence": null,
+      "#": 67
+    },
+    {
+      "title": "DashboardPollsPanel uses unsafe cast and voids a reactive dependency",
+      "severity": "P3",
+      "file": "src/components/parent/DashboardPollsPanel.svelte",
+      "line": 90,
+      "confidence": 100,
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "pre_existing": false,
+      "suggested_fix": "Give `getPollBallotMap` a typed return and remove the `as Record<string, string>` cast; also remove the unnecessary `void pollBallotRefresh`.",
+      "reviewers": [
+        "frontend"
+      ],
+      "why_it_matters": null,
+      "evidence": null,
+      "#": 68
+    },
+    {
+      "title": "No Makefile, justfile, or `scripts/` directory for common development tasks",
+      "severity": "P3",
+      "file": "package.json",
+      "line": 5,
+      "confidence": 95,
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "requires_verification": false,
+      "pre_existing": false,
+      "suggested_fix": "Add a `justfile` or `scripts/dev.sh` that wraps common workflows (`pnpm tauri:dev`, `pnpm check`, `cargo test`, `pnpm test:coverage`) with consistent flags.",
+      "reviewers": [
+        "dev-velocity"
+      ],
+      "why_it_matters": null,
+      "evidence": null,
+      "#": 69
+    },
+    {
+      "title": "Image cache SSRF protection is vulnerable to DNS rebinding",
+      "severity": "P3",
+      "file": "src-tauri/src/image_cache.rs",
+      "line": 528,
+      "why_it_matters": "is_private_host only blocks obvious hostnames and literal IP addresses; it does not resolve hostnames to IP addresses. An attacker can use a hostname that resolves to a private IP (DNS rebinding) to fetch internal images or probe internal services via the image cache.",
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "confidence": 75,
+      "evidence": [
+        "image_cache.rs:528-531 `is_private_host` blocks 'localhost', '.local', '.internal', and literal IPs but does not resolve DNS",
+        "image_cache.rs:582-587 `cache_url_image` relies on this check for SSRF protection"
+      ],
+      "pre_existing": false,
+      "suggested_fix": "Resolve the hostname before the HTTP request and reject targets that resolve to private, link-local, loopback, or CGNAT ranges; cache the resolved IP for the request lifetime.",
+      "reviewers": [
+        "security"
+      ],
+      "#": 70
+    },
+    {
+      "title": "Relay URL validation allows arbitrary paths and query strings",
+      "severity": "P3",
+      "file": "src-tauri/src/lib.rs",
+      "line": 2789,
+      "why_it_matters": "validate_relay_url checks the scheme and host but preserves arbitrary paths and query parameters. A relay URL like wss://trusted.com/path?token=secret is accepted. This can be used to smuggle userinfo-like tokens in the path or to point to unexpected endpoints on a shared host.",
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "confidence": 75,
+      "evidence": [
+        "lib.rs:2789-2811 `validate_relay_url` validates scheme/host/userinfo but returns `trimmed.to_string()`",
+        "lib.rs:3207-3221 `add_custom_relay` uses the raw URL after validation"
+      ],
+      "pre_existing": false,
+      "suggested_fix": "Normalize relay URLs to origin only (scheme + host + port) or explicitly reject paths, query strings, and fragments for relay entries.",
+      "reviewers": [
+        "security"
+      ],
+      "#": 71
+    },
+    {
+      "title": "Dashboard poll vote ingestion does not verify group membership",
+      "severity": "P3",
+      "file": "src-tauri/src/rumor.rs",
+      "line": 632,
+      "why_it_matters": "process_dashboard_poll_rumor records votes using the sender's pubkey but does not verify that the sender is actually a member of the MLS group or the relevant squad. An attacker who can inject or relay a vote event can distort poll results.",
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "confidence": 75,
+      "evidence": [
+        "rumor.rs:632-642 `process_dashboard_poll_rumor` parses vote and calls `db_apply_vote` with `voter` from `rumor.pubkey.to_bech32()`",
+        "No call to verify the voter is in the parent_id/squad membership or the MLS group"
+      ],
+      "pre_existing": false,
+      "suggested_fix": "Before applying a vote, check that the voter pubkey is a member of the parent squad/MLS group (using the existing roster tables) and that the vote is not after the poll's deadline.",
+      "reviewers": [
+        "security"
+      ],
+      "#": 72
+    },
+    {
+      "title": "DmThread copies npub with raw navigator.clipboard and no fallback",
+      "severity": "P3",
+      "file": "src/components/dm/DmThread.svelte",
+      "line": 378,
+      "confidence": 75,
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "pre_existing": false,
+      "suggested_fix": "Use `copyTextToClipboard` from `src/lib/wallet/clipboard-copy.ts` and surface a toast when the copy fails.",
+      "reviewers": [
+        "frontend"
+      ],
+      "why_it_matters": null,
+      "evidence": null,
+      "#": 73
+    },
+    {
+      "title": "ProfileSection swallows clipboard errors when copying npub",
+      "severity": "P3",
+      "file": "src/components/settings/ProfileSection.svelte",
+      "line": 260,
+      "confidence": 75,
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "pre_existing": false,
+      "suggested_fix": "Use `copyTextToClipboard` and show a toast on failure so the user knows the npub was not copied.",
+      "reviewers": [
+        "frontend"
+      ],
+      "why_it_matters": null,
+      "evidence": null,
+      "#": 74
+    }
+  ],
+  "triage_groups": [
+    {
+      "title": "Cryptography and key-handling security",
+      "findings": [
+        1,
+        2,
+        4,
+        5,
+        6,
+        10
+      ],
+      "context": "All secrets flow through a small set of crypto helpers and global caches; flaws here compromise every account.",
+      "preferred_resolution": "Fix the global ENCRYPTION_KEY and hardcoded salt first (#1, #2), then replace unsafe from_utf8_unchecked (#4), then require re-auth for exports (#5), then move secret derivation into Rust (#6).",
+      "why": "These are the highest-severity findings and share the same root cause: secrets are exposed, cached, or derived unsafely."
+    },
+    {
+      "title": "MLS protocol correctness",
+      "findings": [
+        7,
+        8,
+        9,
+        13,
+        19,
+        20,
+        21,
+        22,
+        23,
+        26,
+        27,
+        28
+      ],
+      "context": "Group creation, keypackage publishing, welcome handling, and sync cursors have multiple interlocking gaps.",
+      "preferred_resolution": "Implement the keypackage stub (#7), fix the kind collision (#8), clean up pending message rows (#9), then verify relay confirmation before committing group mutations (#13, #19, #20).",
+      "why": "MLS is the core group messaging primitive; these bugs break group membership, duplicate messages, or leave stale state."
+    },
+    {
+      "title": "Message/event storage and deduplication",
+      "findings": [
+        9,
+        11,
+        14,
+        15,
+        24,
+        25,
+        29,
+        30,
+        31
+      ],
+      "context": "Flat event storage and in-memory state are not always consistent.",
+      "preferred_resolution": "Fix pending row cleanup (#9), then make deduplication atomic (#11), then fix reaction/edit ordering (#24, #25) and the pending ID collision (#14).",
+      "why": "These bugs produce duplicate messages, lost reactions, or out-of-order edits in normal chat usage."
+    },
+    {
+      "title": "EVM and transaction safety",
+      "findings": [
+        6,
+        32,
+        33,
+        39,
+        40
+      ],
+      "context": "Signing and transaction commands lack guardrails and explicit chain context.",
+      "preferred_resolution": "Add user confirmation for signing (#6) first, then enforce chain_id on every transaction (#32), then validate addresses before use (#33).",
+      "why": "Funds are at risk; the P1 confirmation finding is the biggest exposure."
+    },
+    {
+      "title": "Network and attachment SSRF / path traversal",
+      "findings": [
+        12,
+        16,
+        17,
+        18,
+        34,
+        35
+      ],
+      "context": "User-supplied URLs and attachment metadata drive filesystem writes and HTTP requests.",
+      "preferred_resolution": "Add SSRF protection to net.rs downloads (#16) and image_cache (#18), then sanitize attachment extensions (#12), then normalize relay URLs (#17).",
+      "why": "These are abuse vectors that can write outside the app directory or probe internal services."
+    },
+    {
+      "title": "CI and quality gates",
+      "findings": [
+        36,
+        37,
+        38,
+        43,
+        44,
+        45,
+        46,
+        47
+      ],
+      "context": "The project ships cross-platform releases without pre-merge validation.",
+      "preferred_resolution": "Add a quality-gates job to CI (#36), then enable PR builds (#37), then remove the MCP bridge from release deps (#38), then fix the updater endpoint (#43).",
+      "why": "Without CI gates, the highest-impact fixes above cannot be verified automatically."
+    },
+    {
+      "title": "Frontend architecture and store lifecycle",
+      "findings": [
+        3,
+        48,
+        49,
+        50,
+        51,
+        52,
+        53,
+        54,
+        55,
+        56,
+        57,
+        58,
+        59,
+        60,
+        61,
+        62
+      ],
+      "context": "Large components, uncancellable loads, and store cross-talk create a brittle shell.",
+      "preferred_resolution": "Reset the profiles store on logout (#48), validate Tauri payloads (#49), then decompose the largest components (#50, #51, #52, #53, #54) and fix the DM load races (#55).",
+      "why": "These affect user-visible reliability and make the codebase hard for AI and humans to reason about."
+    },
+    {
+      "title": "Project hygiene and AI onboarding",
+      "findings": [
+        42,
+        63,
+        64,
+        65,
+        66,
+        67,
+        68,
+        69,
+        70,
+        71,
+        72,
+        73,
+        74
+      ],
+      "context": "Legacy references, missing docs, and tooling gaps slow contributors.",
+      "preferred_resolution": "Fix the ALCHEMY_ env prefix leak (#63), remove legacy-fix docs (#64), update deep-link scheme (#65), add an AI onboarding doc (#67), and add a justfile (#68).",
+      "why": "These are low-risk but high-leverage for development velocity."
+    }
+  ],
+  "pre_existing_findings": [],
+  "requirements_completeness": null,
+  "learnings": [],
+  "agent_native_gaps": [],
+  "deployment_notes": [],
+  "residual_risks": [
+    "MLS engine (mdk-core / mdk-sqlite-storage) is a git dependency at a fixed commit; its cryptography, downgrade handling, and replay protection were not audited in this pass.",
+    "NIP-17 giftwrap security relies entirely on nostr-sdk; key compromise of a relay or relay MITM could expose metadata even if payload content is encrypted.",
+    "The global MNEMONIC_SEED is held as a standard String; the Rust allocator may move or copy it, and no secure zeroization is performed after logout or key derivation.",
+    "No rate limiting or key-derivation throttling on PIN unlock; an attacker with local filesystem access can attempt many PINs against the Argon2-derived key.",
+    "No certificate pinning for RPC, Blossom, or relay endpoints; a compromised system CA or local MITM can intercept traffic or return malicious payloads.",
+    "The ENCRYPTION_KEY is cached for the process lifetime and never rotated; legacy data encrypted under a weak or leaked PIN cannot be re-keyed.",
+    "The global ChatState (STATE) is a single tokio::sync::Mutex that is acquired frequently and held across async operations. Under heavy load or with many concurrent chats this could become a bottleneck or cause head-of-line blocking; a per-chat lock or actor model would reduce contention but requires a larger refactor.",
+    "The in-memory WRAPPER_ID_CACHE is cleared when sync finishes. A duplicate wrapper received after the cache is cleared but before the DB dedup path is exercised could be processed twice, leading to duplicate UI entries until the DB check catches it.",
+    "Reaction processing in lib.rs drops reactions whose referenced message is not yet in state. The TODO at lib.rs:1810 acknowledges this, but there is no persistent queue, so reactions received ahead of their messages during a partial sync are permanently lost.",
+    "Network errors in net.rs and wallet_ops.rs are swallowed or converted to boolean/String without structured retry metadata. This makes it hard to distinguish transient failures from permanent ones and can lead to silent data staleness in wallet balances and attachment reuse decisions.",
+    "The Nostr client (NOSTR_CLIENT) is a global std::sync::RwLock. While get_nostr_client clones the Arc without holding the lock, set/clear panic on poison and there is no explicit lifetime management across account switches. A poisoned lock after a panic would render the client unreachable.",
+    "Tauri event name casing/hyphenation (e.g. `typing-update`) cannot be fully verified from the frontend; a mismatch with Rust would silently drop typing events.",
+    "Plaintext localStorage caches for wallet summaries, Safe state, and treasury infra are scoped by npub but remain unencrypted; device access can leak account metadata.",
+    "Module-level listeners in `src/stores/profiles.ts` are assumed to be reset by the backend restart on logout; if logout ever stops restarting the app, listeners will continue updating stores.",
+    "Concurrent `parent-map-disk-cache.ts` read/write cycles could interleave if multiple dashboard fetches for the same parent race.",
+    "Svelte 5 legacy reactive semantics may cause subtle re-run bugs in components with many `$:` side-effect blocks.",
+    "MCP bridge crate may still be compiled and linked into release binaries even though the code path is cfg-gated, because it is a non-optional dependency in Cargo.toml.",
+    "Auto-updater endpoint references the legacy `covenant-application` repository, which may cause update checks to fail or return stale artifacts.",
+    "Release notes are a hard-coded placeholder and every release is drafted, so users see no changelog until a human manually edits the release.",
+    "Legacy `vector://` and `vectorapp.io` deep-link/relay references remain in the codebase, risking brand confusion and broken protocol handlers.",
+    "No pre-merge CI means regressions can reach `main` and immediately trigger a cross-platform release build.",
+    "AI contributors rely on AGENTS.md and scattered docs; there is no single onboarding checklist for common tasks."
+  ],
+  "testing_gaps": [
+    "No unit tests for crypto.rs behavior with malformed, non-UTF-8, or truncated ciphertext; unsafe/from_utf8_unchecked path is untested.",
+    "No tests verifying that the Argon2 salt is unique per install or that two identical PINs produce different keys.",
+    "No tests for account key isolation: switching accounts should not decrypt one account's secrets with another account's key.",
+    "No tests for path traversal in attachment extension handling (e.g., MIME subtype containing '..' or path separators).",
+    "No tests for SSRF in attachment downloads or net.rs; private IP ranges, DNS rebinding, and URL scheme validation are not exercised.",
+    "No tests for authorization on export commands (get_seed, export_evm_account_key_plaintext) requiring re-authentication.",
+    "No tests for EVM signing and transaction confirmation boundaries; commands can be invoked without a PIN in tests.",
+    "No tests for auto-accept of channel-in-squad invites verifying the sender's authorization.",
+    "No unit tests for ChatState message ordering, duplicate handling, or reaction application under concurrent additions.",
+    "No tests verifying that pending message rows are cleaned up after a successful send.",
+    "No tests for the MLS keypackage publish path; the stub currently makes the feature untestable.",
+    "No tests for sync cursor advancement after live MLS message processing.",
+    "No tests for the DB connection return-on-error invariant, which would catch the leak identified in get_dm_sent_received.",
+    "No tests that verify send_event_to success list behavior for MLS and DM sends.",
+    "No tests for hex_string_to_bytes malformed input behavior.",
+    "No integration tests for account switching that verify cache consistency and connection pool state.",
+    "No unit tests for `subscribeAppEvents` event routing, listener cleanup, or payload validation.",
+    "No tests that verify `clearAccountState` clears every account-scoped store, including `profiles` and `profileLoadingStates`.",
+    "No tests for DM/channel message-load cancellation and ordering when the user switches conversations rapidly.",
+    "No tests for export-modals clearing secrets from component memory on close and unmount.",
+    "No tests for `getInvokeErrorMessage` / `friendlyMessage` mapping for backend auth and DM-send errors.",
+    "No tests for `currentNpubForPersistence` scoping: stores must not write to localStorage when the current npub is null or changed.",
+    "CI does not run `pnpm test` or `cargo test`.",
+    "No integration tests for Tauri commands; frontend unit tests only mock `invoke` from `@tauri-apps/api/core`.",
+    "Svelte components are excluded from the Vitest coverage report (`src/**/*.svelte`), so UI coverage is unknown.",
+    "No end-to-end harness exists; the self-correcting AI testing plan is documented but not implemented.",
+    "High-risk Rust modules (`mls.rs`, `message.rs`, `chat.rs`, `account_manager.rs`, `evm/wallet_ops.rs`, `evm/advanced_contract_call.rs`, `voice.rs`, `net.rs`) have little or no test coverage.",
+    "No Cargo `[dev-dependencies]` for test helpers (e.g., tempfile, tokio-test, pretty_assertions)."
+  ],
+  "coverage": {
+    "total_findings": 74,
+    "p0": 3,
+    "p1": 16,
+    "p2": 45,
+    "p3": 10,
+    "suppressed": 0,
+    "residual_risks_count": 22,
+    "testing_gaps_count": 28,
+    "failed_reviewers": 0
+  },
+  "artifact_path": "/tmp/compound-engineering/ce-code-review/20260703-131532-80444081",
+  "run_id": "20260703-131532-80444081"
+}
