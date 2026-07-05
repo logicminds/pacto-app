@@ -1,6 +1,7 @@
 export type CommonsBroadcastSubject = 'user' | 'squad';
 
 export type { CommonsBroadcastDurationHours } from './broadcast-duration';
+import type { CommonsBroadcastDurationHours } from './broadcast-duration';
 
 export type CommonsBroadcastAudience = 'new_user' | 'active_user';
 

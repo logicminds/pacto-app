@@ -6,7 +6,7 @@
   import { checkAuthStatus, createAccount, importAccount, unlockWithPin, authLoading, authError, clearAuthError } from '../../stores/auth';
   import { validateRecoveryPhraseForImport } from '../../lib/api/encryption';
 
-  type AuthStep = 'welcome' | 'import' | 'pin-create' | 'pin-confirm' | 'pin-unlock';
+  type AuthStep = 'welcome' | 'import' | 'pin-create' | 'pin-confirm' | 'pin-unlock' | 'checking';
 
   let currentStep: AuthStep = 'welcome';
   let privateKey: string = '';
@@ -16,6 +16,7 @@
 
   // Check if user has stored encrypted key on mount
   onMount(async () => {
+    currentStep = 'checking';
     const status = await checkAuthStatus();
     
     if (status === 'needs-pin') {
